@@ -24,13 +24,25 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -ProfileName web
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -DshHome C:\Users\me\.dsh
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Port 19387
+#
+# The final check asks whether a dsh web server is still answering, and it has to
+# guess the port: `dsh web` defaults to 3080, while the DESKTOP app serves on a
+# different one (19387 on the machine this was measured on, printed in the window's
+# URL) and no file records it. Guessing one port made the check report FAILED for a
+# perfectly good install, which then rolled the whole thing back. So a list of
+# candidates is probed and the first one that answers is the one that counts.
 
 param(
   [string]$PackageDir = (Split-Path $PSScriptRoot -Parent),
   [string]$DshHome = '',
   [string]$ProfileName = 'web',
-  [int]$Port = 3080
+  [int[]]$Ports = @(3080, 19387),
+  [int]$Port = 0
 )
+
+# -Port <n> is the documented single-port form; let it win when it is passed.
+if ($Port -gt 0) { $Ports = @($Port) }
 
 $ErrorActionPreference = 'Continue'
 $PluginName = 'dsh-boot-animation'
@@ -197,15 +209,29 @@ Say '  If this profile does not hot-reload, restart dsh now.'
 Start-Sleep -Seconds 6
 
 Say '=== 5/5 is the service still answering ==='
-$code = ''
-for ($i = 1; $i -le 15; $i++) {
-  $code = curl.exe -s -o NUL -w '%{http_code}' --noproxy '*' "http://127.0.0.1:$Port/" 2>$null
-  if ($code -ne '000' -and $code -ne '') { break }
-  Start-Sleep -Seconds 2
+# Any HTTP status counts as an answer: 401 is the normal one (the root needs the
+# launch token the printed URL carries), 200 means a deployment without the token
+# gate. This is a liveness check, not an authorisation check, so it must not
+# demand one particular code.
+$answered = ''
+$answeredPort = 0
+$curlOk = $true
+foreach ($candidate in $Ports) {
+  for ($i = 1; $i -le 8; $i++) {
+    $code = curl.exe -s -o NUL -w '%{http_code}' --noproxy '*' "http://127.0.0.1:$candidate/" 2>$null
+    if ($LASTEXITCODE -ne 0 -and ($code -eq '' -or $code -eq '000')) {
+      # curl itself failed. That is this machine refusing the tool, not the server
+      # refusing the connection, and the difference decides what to tell the user.
+      if ($null -eq (Get-Command curl.exe -ErrorAction SilentlyContinue)) { $curlOk = $false }
+    }
+    if ($code -ne '' -and $code -ne '000') { $answered = $code; $answeredPort = $candidate; break }
+    Start-Sleep -Seconds 2
+  }
+  if ($answered -ne '') { break }
 }
-Say "  root answers: $code"
+if ($answered -ne '') { Say "  port $answeredPort answers: $answered" } else { Say '  no port answered' }
 
-if ($code -eq '401' -or $code -eq '200') {
+if ($answered -ne '') {
   Say ''
   Say 'DONE. Open dsh in the browser and refresh.'
   Say 'What this check cannot tell you: whether the overlay actually rendered. The page'
@@ -219,12 +245,15 @@ if ($code -eq '401' -or $code -eq '200') {
 }
 
 Say ''
-Say "FAILED: the service did not answer (got '$code')."
-Say 'Restoring the patch layer.'
-Copy-Item (Join-Path $Backup 'cordis.patch.yml') $PatchFile -Force
-if ((Test-Path $LinkPath) -and -not (Select-String -Path $Backup\MANIFEST.txt -Pattern 'hadNodeModulesLink=True' -Quiet)) {
-  Remove-Item $LinkPath -Force -Recurse
+Say 'WARNING: no dsh web server answered on any of these ports:'
+Say "  $($Ports -join ', ')"
+Say 'The plugin row and the link are IN PLACE - they have not been rolled back, because'
+Say 'this check cannot tell a dsh server that is down from a dsh server on a port that'
+Say 'was not tried. The desktop app prints its own port in the window URL; find it there'
+Say 'and re-run this script with -Port <that number> to get a real answer.'
+if (-not $curlOk) {
+  Say 'curl.exe was not usable here. This is the check failing, not necessarily the'
+  Say 'install: run the same port by hand with any HTTP client.'
 }
-Say '  restored. Nothing of this plugin is left in the profile.'
+Say 'If dsh is NOT running, start it: the animation shows on the next page load.'
 Say "Backup: $Backup"
-exit 1

@@ -10,6 +10,16 @@
 # ASCII-only on purpose: Windows PowerShell 5.1 decodes a BOM-less file as the
 # system ANSI codepage, and CJK bytes can terminate a string literal.
 #
+# The same decoding rule governs cordis.patch.yml, and there it is destructive.
+# The patch layer is BOM-less UTF-8 and routinely carries CJK - a provider's
+# displayName, a comment - while `Get-Content` without -Encoding decodes it as the
+# ANSI codepage and `Set-Content -Encoding utf8` writes the mangled text back plus
+# a BOM. Measured on a real profile: `displayName: <two CJK chars>` came back as
+# four unrelated characters and the file grew a BOM. The patch layer is the user's,
+# not this plugin's, so both operations below go through .NET's UTF-8 codec, which
+# decodes correctly and writes no BOM. That is the whole reason this script does
+# not simply use Get-Content/Set-Content.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File uninstall.ps1
 #   powershell -ExecutionPolicy Bypass -File uninstall.ps1 -ProfileName web
@@ -25,6 +35,17 @@ $PluginName = 'dsh-boot-animation'
 
 function Say($m) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $m" }
 function Fail($m) { Say "FAILED: $m"; exit 2 }
+
+# The patch layer is UTF-8 without a BOM, and must stay exactly that way.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Get-Lines([string]$path) {
+  return @([System.IO.File]::ReadAllLines($path, $Utf8NoBom))
+}
+
+function Set-Lines([string]$path, [string[]]$lines) {
+  [System.IO.File]::WriteAllLines($path, $lines, $Utf8NoBom)
+}
 
 if ($DshHome -eq '') {
   if ($env:DSH_HOME -ne '' -and $null -ne $env:DSH_HOME) { $DshHome = $env:DSH_HOME }
@@ -49,7 +70,7 @@ Copy-Item $PatchFile (Join-Path $Backup 'cordis.patch.yml') -Force
 Say "  backup = $Backup"
 
 Say '=== 2/3 remove the row this plugin appended ==='
-$lines = @(Get-Content $PatchFile)
+$lines = Get-Lines $PatchFile
 $kept = @()
 $removed = 0
 for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -71,14 +92,27 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
 if ($removed -eq 0) {
   Say "  no row for $PluginName found; the patch layer is already clean"
 } else {
-  Set-Content -Path $PatchFile -Value $kept -Encoding utf8
+  Set-Lines $PatchFile $kept
   Say "  removed $removed row(s)"
 }
 
 Say '=== 3/3 remove the directory link ==='
+# The link is a junction. `Remove-Item -Recurse` on one can prompt for
+# confirmation and then fail as "not empty" in a non-interactive shell, so the
+# link alone is removed with rmdir, which never follows it into the target.
+# Whatever is NOT a reparse point is refused instead of deleted: a real directory
+# here would be the user's, and this script may not destroy their data.
 if (Test-Path $LinkPath) {
-  Remove-Item $LinkPath -Force -Recurse
-  Say "  removed $LinkPath"
+  $item = Get-Item $LinkPath -Force
+  $isLink = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+  if (-not $isLink) {
+    Say "  WARNING: $LinkPath is not a link; refusing to delete it."
+    Say '  Remove it yourself if it really is this plugin.'
+  } else {
+    $null = cmd /c rmdir "$LinkPath" 2>&1
+    if (Test-Path $LinkPath) { Say "  WARNING: could not remove $LinkPath" }
+    else { Say "  removed $LinkPath" }
+  }
 } else {
   Say '  no link present'
 }
