@@ -84,11 +84,32 @@ node tools/apply-faststart.mjs --apply  # 真的处理
 |---|---|
 | **暂时不要动画** | 设置卡片里关掉「开启启动动画」，刷新 |
 | **只删某一段片子** | 把它从 `assets\videos\` 移走，刷新 |
-| **把插件摘掉（保留文件）** | 跑 `tools\uninstall.ps1`，然后重启 DSH |
+| **把插件摘掉（保留文件）** | 跑 `tools\uninstall.ps1`，然后刷新 |
 | **彻底拆除** | 跑 `tools\uninstall.ps1`，再把整个插件目录删掉 |
 
 > `uninstall.ps1` 默认摘的是 `web` 这个 profile；桌面版 DSH 用的是 `desktop`，要加一句
 > `-ProfileName desktop`（装回去用 `tools\install.ps1`，同样带这个参数）。
+>
+> profile 是热加载的，摘掉之后**刷新页面**就回到 DSH 原生启动页，不必重启。
+
+摘掉插件就是两件事：删掉 `cordis.patch.yml` 里那个 `- insert:` 块，再删掉 profile 里的
+`node_modules\dsh-boot-animation` 链接。手工做也行——**这个块未必在文件末尾**（DSH 自己会重排
+这一层），所以按名字找，别按位置找；链接用 `rmdir` 删（它只删链接，不会跟进到插件目录里）：
+
+```powershell
+$Profile = "$env:USERPROFILE\.dsh\profiles\desktop"
+# 1. 在 cordis.patch.yml 里找到这三行并删掉（位置不定，搜 boot-animation）
+#      - insert:
+#          - id: boot-animation
+#            name: dsh-boot-animation
+# 2. 删掉链接（不要用 Remove-Item -Recurse，它会顺着链接删进插件目录）
+cmd /c rmdir "$Profile\node_modules\dsh-boot-animation"
+```
+
+> **别用旧版 `uninstall.ps1` 手工改这个文件。** 早先的版本用 PowerShell 读回再写出
+> `cordis.patch.yml`，而 PS 5.1 会把无 BOM 的 UTF-8 当成 ANSI 解码——你 profile 里的中文
+> （比如某个 provider 的 `displayName`）会被写成乱码，文件还会多个 BOM。当前版本的脚本已经
+> 改成按 UTF-8 原样读写，上面那条手工路子在任何版本上都安全。
 
 ## 出问题时
 

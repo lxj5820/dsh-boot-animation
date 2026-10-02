@@ -35,7 +35,8 @@ powershell -ExecutionPolicy Bypass -File tools\install.ps1
 - 找不到 profile 会**明确报错并列出有哪些 profile**，不会乱写
 - 装之前**自动备份** `cordis.patch.yml`
 - 大多数 profile 会热加载（几秒内生效）；不热加载的，脚本会提醒你手动重启
-- **撤销**：`powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1`
+- **撤销**：`powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -ProfileName desktop`
+  （桌面版 profile 叫 `desktop`，脚本默认找的是 `web`；详见下面的「卸掉」）
 
 ## 装完检查
 
@@ -69,8 +70,18 @@ powershell -ExecutionPolicy Bypass -File tools\install.ps1
 | 想要 | 怎么做 |
 |---|---|
 | 暂时不要动画 | 设置卡片里关掉「开启启动动画」 |
-| 摘掉插件（留文件） | `powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1`，然后重启 |
+| 摘掉插件（留文件） | `powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -ProfileName desktop`，然后刷新 |
 | 彻底删掉 | 先跑上面的 uninstall，再删掉整个目录 |
+
+profile 是热加载的，摘掉后刷新页面就回到 DSH 原生启动页，不必重启。
+
+摘掉插件无非两件事：删掉 `cordis.patch.yml` 里那个 `- insert:` 块（它未必在文件末尾，DSH 自己
+会重排这一层，所以**搜 `boot-animation` 找，别按位置找**），再删掉 profile 下的
+`node_modules\dsh-boot-animation` 链接（用 `cmd /c rmdir`，它只删链接，不会跟到插件目录里）。
+不想跑脚本就手工这么来。
+
+> 早先版本的 `uninstall.ps1` 不能用：它读回再写出 `cordis.patch.yml` 时按 ANSI 解码无 BOM 的
+> UTF-8，会把你 profile 里的中文写成乱码并加上 BOM。当前版本已改成按 UTF-8 原样读写。
 
 ## 这份副本里没有什么
 

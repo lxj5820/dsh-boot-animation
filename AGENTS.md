@@ -58,7 +58,8 @@ Every line here cost a real debugging session. They are not style preferences.
 
 | Rule | What happens if it is broken |
 |---|---|
-| **Never read/write a CJK-bearing source file with PowerShell.** Use the file tools; verify with Node `readFileSync(..., 'utf8')`. | PowerShell 5.1 decodes BOM-less UTF-8 as GBK, and a `Set-Content` round-trip destroys every Chinese character — once collapsed `'…'` into `鈥?` and broke the script. |
+| **Never read/write a CJK-bearing file with PowerShell** — source, data or the user's config alike. Use the file tools; verify with Node `readFileSync(..., 'utf8')`. | PowerShell 5.1 decodes BOM-less UTF-8 as GBK, and a `Set-Content` round-trip destroys every Chinese character — once collapsed `'…'` into `鈥?` and broke the script. The same rule covers files this package does not own: `cordis.patch.yml` carries a provider `displayName`, and the `Get-Content`/`Set-Content` pair in `tools/uninstall.ps1` turned it into mojibake and added a BOM. When a `.ps1` genuinely must rewrite such a file, go through .NET — `[System.IO.File]::ReadAllLines($p, $utf8NoBom)` / `WriteAllLines($p, $lines, $utf8NoBom)` with `New-Object System.Text.UTF8Encoding($false)` — because on 5.1 `Set-Content -Encoding utf8` means *UTF-8 with BOM*, which is still a change to a file that is not the script's to change. |
+| **A step that only checks must not repair.** | `tools/install.ps1`'s last step guesses which port dsh is on; when the guess missed it reported FAILED and rolled back a fully working install. A check that cannot tell "broken" from "not measured" has to say which one it is and leave the state alone. |
 | **No backtick anywhere inside a CSS blob** (the screen's `style()` string, the card's `CSS` string). | The string ends early and the build keeps the *previous* artifact. It looks like the change had no effect. |
 | **Read optional services with `ctx.inject([...], (owner) => owner.get(name))`.** Never `ctx.get(name)`. | `ctx.get` is a one-shot read that races activation and silently answers `undefined`; the card then never registers and there is no error anywhere. Every other client plugin in the deployment uses the `ctx.inject` form. |
 | **The client half declares no `inject`.** | A required service leaves the fiber PENDING in a profile that lacks it, `apply` never runs, `clientReady` is never sent, and the animation refuses to hand over. |
@@ -117,7 +118,7 @@ preview tooling:
 | `tools/mp4-audit.mjs` | Whether each clip's index actually points into its own `mdat` |
 | `tools/codec-report.mjs` | The video codec fourcc per clip |
 | `tools/preview.mjs` | Local two-server preview of the injection, without restarting DSH |
-| `tools/install.ps1` / `tools/uninstall.ps1` | Add or remove the profile link and the patch row |
+| `tools/install.ps1` / `tools/uninstall.ps1` | Add or remove the profile link and the patch row. Both name the profile the running DSH uses (`desktop`, not the `web` default) and both must leave `cordis.patch.yml` byte-identical except for the row they own — UTF-8, no BOM, CJK intact. `install.ps1`'s last step only *reports* whether a dsh server answered; it does not repair, and it does not roll back on a port it could not reach. |
 
 For a Host-half change the offline proof that matters is that the module still
 evaluates, still exports the schema the settings service looks for, and still
