@@ -217,6 +217,29 @@ diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=
 
 两条路，选一条。**免重启**改动最小，**重启**写入的是正式依赖声明。**路一只是"先看效果"，最终状态应当是路二**：路一不写依赖声明，profile 里那次 `pnpm install`（例如你以后用 `dsh plugin add` 装别的插件）可能把这个未声明的链接剪掉，而 `cordis.patch.yml` 里那行 insert 还在——那时 DSH 会因为"行解析不到包"再次起不来。路二把插件变成和另外 15 个插件一样的 bundle 层，并在同一步里把路一追加的那行移除（同一插件被两层各挂一次会产出**两条同 id 的 entry**，已实测）。
 
+### macOS / Linux：一条路
+
+Windows 那两条路在这里合成一条：`tools/install.sh` 直接把插件接线成正式依赖（路二的终态），跑完重启一次。
+
+```sh
+sh tools/install.sh --profile desktop   # 桌面版（DSH Desktop 用的那个 profile）
+sh tools/install.sh                     # dsh web 用的那个（默认就是 web）
+```
+
+三个参数值得记一下：`--profile`（装进哪个 profile，默认 `web`）、`--dsh-home`（先看 `DSH_HOME`，再找 `~/.dsh`）、`--package-dir`（默认是本脚本所在包的根目录）。
+
+它做四件事：备份 profile 的 `cordis.patch.yml` → 在 profile 的 `node_modules` 里建链接 → 往 `cordis.patch.yml` 追加一行 insert → 把一份 ≥3.18.4 的 `@deepseek-ai/schemastery` 链进包目录（少了它设置卡片会静默消失）。**不跑 pnpm、不改 `package.json`**；如果这台机器已经把它当作 bundle 层挂着，它会直接收工，不会挂出第二条同 id 的 entry。
+
+跑完**完全退出并重开 DSH**。撤销：
+
+```sh
+sh tools/uninstall.sh                  # --profile 同上
+```
+
+它只摘掉自己追加的那三行、删掉链接，并断言 `cordis.patch.yml` 回到安装前的字节（你原有的行、注释、CRLF、末尾换行都原样保留）。
+
+> 这两个脚本是 macOS / Linux 版；`tools/*.ps1` 与 `.bat` 仍是 Windows 专用。
+
 ### 路一：免重启（推荐先试）
 
 ```powershell
@@ -403,6 +426,8 @@ tools/mp4-audit.mjs          校验索引与数据是否自洽（排除"文件�
 tools/mp4-info.mjs           从容器里读时长 / 分辨率 / 有没有音轨
 tools/transition-sampler.mjs 过渡效果样本页（端口 8880，纯本地开发用，不在启动路径上）
 tools/record-placeholder.mjs 用 canvas + MediaRecorder 录一个占位片段（本机没有 H.264 编码器时用）
+tools/install.sh             macOS / Linux 装机：回滚点 + 链接 + 追加 patch 行（不跑 pnpm、不改 package.json）
+tools/uninstall.sh           上面那步的撤销：摘掉它追加的行 + 删链接，断言字节还原
 tools/apply-live.ps1         免重启接线：备份 + 建 node_modules 链接 + 追加 patch 行
 tools/rollback-live.ps1      撤销上面那一步
 tools/apply-boot-animation.ps1     装机：回滚点 + 迁移 + 重启 + 自检 + 自动回滚

@@ -85,10 +85,10 @@ Every line here cost a real debugging session. They are not style preferences.
 Installed state: the package is linked into a DSH profile
 (`<profile>/node_modules/dsh-boot-animation` → this directory) with a one-row
 `- insert:` block in the profile's `cordis.patch.yml`. `package.json` is not
-modified and no `pnpm install` runs. `tools/install.ps1` does it, and
-`tools/uninstall.ps1` reverses it. The profile to name is the one DSH actually
-runs (`desktop` for the desktop app, `web` for `dsh web`), not the script's
-default.
+modified and no `pnpm install` runs. `tools/install.ps1` (Windows) and
+`tools/install.sh` (macOS / Linux) do it, and each one's `uninstall.*` reverses
+it. The profile to name is the one DSH actually runs (`desktop` for the desktop
+app, `web` for `dsh web`), not the script's default.
 
 One thing the link does **not** provide: `@deepseek-ai/schemastery`. The Host half
 imports it statically, so it must resolve from this directory — normally that is
@@ -117,7 +117,7 @@ preview tooling:
 | `tools/mp4-audit.mjs` | Whether each clip's index actually points into its own `mdat` |
 | `tools/codec-report.mjs` | The video codec fourcc per clip |
 | `tools/preview.mjs` | Local two-server preview of the injection, without restarting DSH |
-| `tools/install.ps1` / `tools/uninstall.ps1` | Add or remove the profile link and the patch row |
+| `tools/install.ps1` / `tools/install.sh` and their `uninstall.*` | Add or remove the profile link and the patch row |
 
 For a Host-half change the offline proof that matters is that the module still
 evaluates, still exports the schema the settings service looks for, and still
