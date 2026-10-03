@@ -79,6 +79,33 @@ const DEFAULT_SETTINGS = {
   enterMode: 'tail',
   /** Clip file names excluded from the pool by the user. */
   disabledClips: [],
+  /**
+   * Whether the clip may make a sound at all.
+   *
+   * On, the screen tries to play unmuted and offers its sound button as the
+   * gesture the audio policy asks for. Off, the screen is silenced for good: no
+   * unmuted attempt, no sound button and no way to re-enable audio from the
+   * overlay. Defaults to on so an existing profile behaves exactly as before.
+   */
+  sound: true,
+  /**
+   * Whether a pointer press enters immediately.
+   *
+   * The screen normally spends the first press unlocking audio (Chromium grants
+   * sound only to a gesture, and the entering gesture cannot also be the unlock)
+   * and the second press leaving. On, the first press leaves — the shortcut a
+   * user wants once the clip has no sound to offer, or when they simply do not
+   * care to hear it.
+   */
+  clickToEnter: false,
+  /**
+   * Whether the bottom hint line is drawn.
+   *
+   * Off leaves the title and the progress bar in place and only hides the
+   * sentence that says what a press does, for a screen judged to be better
+   * without instructions on it.
+   */
+  showHint: true,
 }
 
 /** The accepted `enterMode` values, in the order the browser card presents them. */
@@ -151,11 +178,12 @@ function readField(config, key) {
  * `- insert: id: boot-animation`. `src/client.js` spells that same string in
  * `SETTINGS_NAMESPACE`, and nothing else checks that the two agree.
  *
- * The four field names, defaults and bounds are the ones the removed
- * `settings.register(SETTINGS_NS, schema)` call declared, so an absent settings
- * document and an empty one still behave identically.
+ * The field names, defaults and bounds are the ones the removed
+ * `settings.register(SETTINGS_NS, schema)` call declared, plus the three
+ * behaviour switches added later (sound, clickToEnter, showHint), so an absent
+ * settings document and an empty one still behave identically.
  *
- * All four are volatile, because that is the only class the settings service
+ * Every field is volatile, because that is the only class the settings service
  * serves: it projects volatile fields and nothing else. The price is that the
  * applied config carries live references rather than plain values — see
  * `readField`.
@@ -165,6 +193,9 @@ export const Config = z.object({
   fadeMs: live(z.number().min(300).max(5000).default(DEFAULT_SETTINGS.fadeMs)),
   enterMode: live(z.union([...ENTER_MODES]).default(DEFAULT_SETTINGS.enterMode)),
   disabledClips: live(z.array(z.string()).default([])),
+  sound: live(z.boolean().default(DEFAULT_SETTINGS.sound)),
+  clickToEnter: live(z.boolean().default(DEFAULT_SETTINGS.clickToEnter)),
+  showHint: live(z.boolean().default(DEFAULT_SETTINGS.showHint)),
 })
 
 /** Package name the loader mounts this row as. */
@@ -417,11 +448,17 @@ export function apply(ctx, config) {
       const fadeMs = readField(config, 'fadeMs')
       const enterMode = readField(config, 'enterMode')
       const disabledClips = readField(config, 'disabledClips')
+      const sound = readField(config, 'sound')
+      const clickToEnter = readField(config, 'clickToEnter')
+      const showHint = readField(config, 'showHint')
       return {
         enabled: typeof enabled === 'boolean' ? enabled : DEFAULT_SETTINGS.enabled,
         fadeMs: typeof fadeMs === 'number' ? fadeMs : DEFAULT_SETTINGS.fadeMs,
         enterMode: ENTER_MODES.includes(enterMode) ? enterMode : DEFAULT_SETTINGS.enterMode,
         disabledClips: Array.isArray(disabledClips) ? disabledClips : [],
+        sound: typeof sound === 'boolean' ? sound : DEFAULT_SETTINGS.sound,
+        clickToEnter: typeof clickToEnter === 'boolean' ? clickToEnter : DEFAULT_SETTINGS.clickToEnter,
+        showHint: typeof showHint === 'boolean' ? showHint : DEFAULT_SETTINGS.showHint,
       }
     } catch (error) {
       ctx.logger?.warn?.('boot-animation: settings unreadable, using defaults', error)
@@ -522,6 +559,9 @@ export function apply(ctx, config) {
         holdMs: 15000,
         fadeMs: settings.fadeMs,
         enterMode: settings.enterMode,
+        sound: settings.sound,
+        clickToEnter: settings.clickToEnter,
+        showHint: settings.showHint,
       })}`,
     })
     table.push({ kind: 'script', placement: 'head', text: bootScreenSource() })

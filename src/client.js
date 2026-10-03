@@ -62,7 +62,26 @@ const FADE_CHOICES = [1000, 1500, 2000, 3000, 4000]
 const ENTER_MODES = [
   ['tail', '片尾交叉溶解', '片尾开始溶解，影片放完时正好进界面'],
   ['end', '放完再淡', '影片完全静止在最后一帧，再淡出'],
-  ['click', '点击才进', '循环播放，直到你点一下（第一下开声音）'],
+  ['click', '点击才进', '循环播放，直到你点一下进入'],
+]
+
+/**
+ * The three behaviour switches, in card order.
+ *
+ * Each entry is the field name, its label, and the pair of sentences under it —
+ * the one for "on" and the one for "off" — because a switch whose explanation
+ * does not change with its state is the reason people leave it alone.
+ */
+const BEHAVIOUR = [
+  ['sound', '播放影片声音',
+    '影片尝试带声音播放，右下角有一个开声音的按钮',
+    '已彻底静音：不会尝试开声音，声音按钮也不再出现'],
+  ['clickToEnter', '点鼠标直接进入',
+    '按一下画面就直接进入界面，不再用第一下开声音',
+    '按一下先开声音，再按一下才进入（默认）'],
+  ['showHint', '显示底部提示文字',
+    '画面底部显示「点击进入」这类操作提示',
+    '底部不再显示操作提示，标题和进度条保留'],
 ]
 
 /** Stable empty snapshot, so `getSnapshot` never returns a fresh object. */
@@ -178,7 +197,7 @@ function formatDuration(seconds) {
  * @returns the one-line description.
  */
 function BootAnimationSummary() {
-  return '短片、进入方式与素材池'
+  return '短片、声音、进入方式与素材池'
 }
 
 /**
@@ -304,6 +323,12 @@ function BootAnimationCard(props) {
   const fadeMs = typeof stored.fadeMs === 'number' ? stored.fadeMs : 2000
   const enterMode = typeof stored.enterMode === 'string' ? stored.enterMode : 'tail'
   const disabled = Array.isArray(stored.disabledClips) ? stored.disabledClips : []
+  // Each switch is read the way the Host reads it: absent means the documented
+  // default, so a profile written before these fields existed renders them on.
+  const sound = stored.sound !== false
+  const clickToEnter = stored.clickToEnter === true
+  const showHint = stored.showHint !== false
+  const behaviour = { sound, clickToEnter, showHint }
 
 
   // The pool, and each clip's real length. The length comes from a throwaway media
@@ -461,6 +486,26 @@ function BootAnimationCard(props) {
     write('disabledClips', next)
   }
 
+  /**
+   * One behaviour switch: label, checkbox, and the sentence for the state it is
+   * currently in. A plain factory rather than a component — it calls no hooks,
+   * which is what lets the card's hook count stay the same for every render.
+   */
+  const switchRow = (field, label, onNote, offNote) => React.createElement('div', {
+    className: 'dshba-sec',
+    key: field,
+  },
+  React.createElement('label', { className: 'dshba-switch' },
+    React.createElement('input', {
+      type: 'checkbox',
+      checked: behaviour[field],
+      disabled: busy,
+      onChange: (event) => write(field, event.target.checked),
+    }),
+    React.createElement('span', { className: 'dshba-h', style: { margin: '0' } }, label)),
+  React.createElement('div', { className: 'dshba-p', style: { marginTop: '6px', marginBottom: '0' } },
+    behaviour[field] ? onNote : offNote))
+
   const header = React.createElement('button', {
     type: 'button',
     className: 'dshba-head',
@@ -495,6 +540,14 @@ function BootAnimationCard(props) {
         enabled
           ? '关掉并刷新页面，就会回到 DSH 原生启动页'
           : '已关闭：刷新页面后就是 DSH 原生启动页，下面的设置暂时不生效')))
+
+    sections.push(React.createElement('div', { className: 'dshba-sec', key: 'behaviour-head' },
+      React.createElement('div', { className: 'dshba-h' }, '交互与声音'),
+      React.createElement('div', { className: 'dshba-p', style: { marginBottom: '0' } },
+        '三项都在下次刷新页面时生效')))
+    for (const entry of BEHAVIOUR) {
+      sections.push(switchRow(entry[0], entry[1], entry[2], entry[3]))
+    }
 
     sections.push(React.createElement('div', { className: 'dshba-sec', key: 'fade' },
       React.createElement('div', { className: 'dshba-h' }, '淡入时长'),

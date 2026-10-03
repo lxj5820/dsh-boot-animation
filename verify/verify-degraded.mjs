@@ -9,7 +9,7 @@
 //
 // Run from the package root:  node verify/verify-degraded.mjs
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, lstatSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -38,12 +38,20 @@ mkdirSync(join(scratch, 'node_modules', '@deepseek-ai'), { recursive: true })
 cpSync(join(root, 'entry.js'), join(scratch, 'entry.js'))
 cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
 cpSync(join(root, 'src'), join(scratch, 'src'), { recursive: true })
+// `dereference: true` is load-bearing, not tidiness. Installed, this package's
+// node_modules entries are SYMLINKS (a profile links the bundle in), and a
+// recursive copy that preserves symlinks makes the scratch tree point back at the
+// real library — so the rename below edits the library DSH itself loads. That
+// happened: it silently removed `.volatile()` from the installed schemastery.
 for (const name of ['schemastery', 'cosmokit']) {
   cpSync(join(root, 'node_modules', '@deepseek-ai', name),
-    join(scratch, 'node_modules', '@deepseek-ai', name), { recursive: true })
+    join(scratch, 'node_modules', '@deepseek-ai', name), { recursive: true, dereference: true })
 }
-rewrite(join(scratch, 'node_modules', '@deepseek-ai', 'schemastery', 'lib', 'index.mjs'))
-rewrite(join(scratch, 'node_modules', '@deepseek-ai', 'schemastery', 'lib', 'index.cjs'))
+const scratchSchema = join(scratch, 'node_modules', '@deepseek-ai', 'schemastery')
+check('the scratch schema library is a real copy, not a link back to the installed one',
+  lstatSync(scratchSchema).isSymbolicLink() === false, lstatSync(scratchSchema).isSymbolicLink() ? 'symlink' : 'directory')
+rewrite(join(scratchSchema, 'lib', 'index.mjs'))
+rewrite(join(scratchSchema, 'lib', 'index.cjs'))
 
 console.log('\n[1] an older schema library')
 const mod = await import(new URL('.verify-degraded/entry.js', new URL('../', import.meta.url)).href)
@@ -53,7 +61,7 @@ check('the module still evaluates', typeof mod.apply === 'function')
 check('Config is still exported', 'toJSON' in mod.Config)
 equal('every field degrades to non-volatile',
   Object.keys(mod.Config.dict).map((key) => mod.Config.dict[key].meta.volatile ?? null),
-  [null, null, null, null])
+  [null, null, null, null, null, null, null])
 
 function equal(label, actual, expected) {
   const a = JSON.stringify(actual)

@@ -84,8 +84,12 @@ cpSync(join(root, 'entry.js'), join(scratch, 'entry.js'))
 cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
 cpSync(join(root, 'src'), join(scratch, 'src'), { recursive: true })
 for (const name of ['schemastery', 'cosmokit']) {
+  // `dereference: true`: an installed package's node_modules entries are symlinks,
+  // and a scratch tree that keeps the link is not a copy — it is the real library
+  // behind a new path. See verify-degraded.mjs, where that once edited the
+  // installed schemastery.
   cpSync(join(root, 'node_modules', '@deepseek-ai', name),
-    join(scratch, 'node_modules', '@deepseek-ai', name), { recursive: true })
+    join(scratch, 'node_modules', '@deepseek-ai', name), { recursive: true, dereference: true })
 }
 
 const clipDir = join(scratch, 'assets', 'videos')
@@ -116,18 +120,32 @@ check('Config is callable', typeof mod.Config === 'function')
 const Config = mod.Config
 
 // ---------------------------------------------------------------------------
-// 2. The schema is real schemastery with the four fields and the old defaults.
+// 2. The schema is real schemastery with the seven fields and the old defaults.
 // ---------------------------------------------------------------------------
 
 console.log('\n[2] Config schema')
-equal('field order', Object.keys(Config.dict), ['enabled', 'fadeMs', 'enterMode', 'disabledClips'])
-equal('defaults for {}', plainConfig(Config({})),
-  { enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [] })
-equal('defaults for undefined (absent settings document)', plainConfig(Config(undefined)),
-  { enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [] })
+equal('field order', Object.keys(Config.dict),
+  ['enabled', 'fadeMs', 'enterMode', 'disabledClips', 'sound', 'clickToEnter', 'showHint'])
+const DEFAULTS = {
+  enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [],
+  sound: true, clickToEnter: false, showHint: true,
+}
+
+/** The same defaults as they reach the injected row (no `enabled`, no pool). */
+const INJECTED_DEFAULTS = {
+  base: '/plugins/dsh-boot-animation',
+  manifest: '/plugins/dsh-boot-animation/clips.json',
+  holdMs: 15000,
+  fadeMs: 2000,
+  enterMode: 'tail',
+  sound: true,
+  clickToEnter: false,
+  showHint: true,
+}
+equal('defaults for {}', plainConfig(Config({})), DEFAULTS)
+equal('defaults for undefined (absent settings document)', plainConfig(Config(undefined)), DEFAULTS)
 equal('defaults via ~standard.validate (the path cordis uses)',
-  plainConfig(Config['~standard'].validate({}).value),
-  { enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [] })
+  plainConfig(Config['~standard'].validate({}).value), DEFAULTS)
 
 function rejects(label, value) {
   let issue = null
@@ -150,6 +168,12 @@ for (const mode of ['tail', 'end', 'click']) accepts('enterMode "' + mode + '" a
 rejects('enabled "yes" rejected', { enabled: 'yes' })
 rejects('disabledClips "a.mp4" rejected', { disabledClips: 'a.mp4' })
 accepts('disabledClips ["a.mp4"] accepted', { disabledClips: ['a.mp4'] })
+rejects('sound "no" rejected', { sound: 'no' })
+accepts('sound false accepted (the silence switch)', { sound: false })
+rejects('clickToEnter 1 rejected', { clickToEnter: 1 })
+accepts('clickToEnter true accepted', { clickToEnter: true })
+rejects('showHint "yes" rejected', { showHint: 'yes' })
+accepts('showHint false accepted (the hint switch)', { showHint: false })
 
 // ---------------------------------------------------------------------------
 // 3. Every field is volatile: without one, dsh-settings never serves the
@@ -157,7 +181,8 @@ accepts('disabledClips ["a.mp4"] accepted', { disabledClips: ['a.mp4'] })
 // ---------------------------------------------------------------------------
 
 console.log('\n[3] live (volatile) projection')
-for (const key of ['enabled', 'fadeMs', 'enterMode', 'disabledClips']) {
+const FIELD_KEYS = Object.keys(Config.dict)
+for (const key of FIELD_KEYS) {
   check('field "' + key + '" is volatile', Config.dict[key].meta.volatile === true,
     'meta.volatile=' + JSON.stringify(Config.dict[key].meta.volatile))
 }
@@ -195,18 +220,16 @@ function projectForm(schema, value) {
 
 const form = volatileForm(Config)
 check('describe() would NOT drop this entry (volatileForm !== undefined)', form !== undefined)
-equal('described field keys', Object.keys(form?.dict ?? {}), ['enabled', 'fadeMs', 'enterMode', 'disabledClips'])
+equal('described field keys', Object.keys(form?.dict ?? {}), FIELD_KEYS)
 check('described schema serializes for the client', 'refs' in form.toJSON())
-equal('described value for the pristine config', projectForm(form, plainConfig(Config({}))),
-  { enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [] })
-for (const key of ['enabled', 'fadeMs', 'enterMode', 'disabledClips']) {
+equal('described value for the pristine config', projectForm(form, plainConfig(Config({}))), DEFAULTS)
+for (const key of FIELD_KEYS) {
   check('write path accepts "' + key + '" (isVolatilePath)', isVolatilePath(Config, [key]) === true)
 }
 check('write path would reject an undeclared field', isVolatilePath(Config, ['nope']) === false)
 
 const rehydrated = new z(Config.toJSON())
-equal('toJSON round-trip keeps the defaults', plainConfig(rehydrated({})),
-  { enabled: true, fadeMs: 2000, enterMode: 'tail', disabledClips: [] })
+equal('toJSON round-trip keeps the defaults', plainConfig(rehydrated({})), DEFAULTS)
 
 // ---------------------------------------------------------------------------
 // 4. apply(): routes, the pre-boot injection, and the removed settings service.
@@ -265,13 +288,7 @@ equal('two head rows injected when enabled', enabledRows.length, 2)
 equal('first row placement', [enabledRows[0].kind, enabledRows[0].placement], ['script', 'head'])
 check('config row assigns the documented global', enabledRows[0].text.startsWith(CFG_PREFIX),
   enabledRows[0].text.slice(0, 44))
-equal('injected config', injectedConfig(enabledRows), {
-  base: '/plugins/dsh-boot-animation',
-  manifest: '/plugins/dsh-boot-animation/clips.json',
-  holdMs: 15000,
-  fadeMs: 2000,
-  enterMode: 'tail',
-})
+equal('injected config', injectedConfig(enabledRows), INJECTED_DEFAULTS)
 check('second row is the boot screen source verbatim', enabledRows[1].text === bootScreenSource,
   enabledRows[1].text === '' ? 'EMPTY (src/boot-screen.js unreadable)' : enabledRows[1].text.length + ' chars')
 
@@ -288,9 +305,16 @@ const partial = mount(makeCtx(), { fadeMs: 4000 })
 equal('per-field fallback on a partial plain config',
   [injectedConfig(render(partial)).fadeMs, injectedConfig(render(partial)).enterMode], [4000, 'tail'])
 
-const junk = mount(makeCtx(), { enabled: true, fadeMs: 'x', enterMode: 'nope', disabledClips: 'no' })
+const junk = mount(makeCtx(), {
+  enabled: true, fadeMs: 'x', enterMode: 'nope', disabledClips: 'no',
+  sound: 'no', clickToEnter: 1, showHint: 'yes',
+})
 const junkCfg = injectedConfig(render(junk))
-equal('per-field fallback on a junk config', [junkCfg.fadeMs, junkCfg.enterMode], [2000, 'tail'])
+equal('per-field fallback on a junk config',
+  [junkCfg.fadeMs, junkCfg.enterMode, junkCfg.sound, junkCfg.clickToEnter, junkCfg.showHint],
+  [2000, 'tail', true, false, true])
+equal('per-field fallback on an absent config keeps every default',
+  injectedConfig(render(noConfig)), INJECTED_DEFAULTS)
 
 // ---------------------------------------------------------------------------
 // 4b. The applied config carries LIVE references, and reading them per render
@@ -306,7 +330,7 @@ check('...whose snapshot is the configured value', liveConfig.fadeMs.get() === 4
 
 const live = mount(makeCtx(), liveConfig)
 equal('configured values reach the injection', injectedConfig(render(live)),
-  { base: '/plugins/dsh-boot-animation', manifest: '/plugins/dsh-boot-animation/clips.json', holdMs: 15000, fadeMs: 4000, enterMode: 'click' })
+  { ...INJECTED_DEFAULTS, fadeMs: 4000, enterMode: 'click' })
 
 // Replay what @deepseek-ai/cordis-plugin-loader does on a volatile-only change
 // (lib/index.js:410-415): commit a new snapshot into the SAME reference.
@@ -314,6 +338,16 @@ liveConfig.fadeMs[VOLATILE_REF](8000)
 liveConfig.enterMode[VOLATILE_REF]('end')
 equal('a committed snapshot is visible to the next index render, with no re-apply',
   [injectedConfig(render(live)).fadeMs, injectedConfig(render(live)).enterMode], [8000, 'end'])
+
+// The three behaviour switches are volatile too, so flipping them in Settings
+// reaches the next page load without restarting the kernel.
+liveConfig.sound[VOLATILE_REF](false)
+liveConfig.clickToEnter[VOLATILE_REF](true)
+liveConfig.showHint[VOLATILE_REF](false)
+equal('a committed behaviour switch reaches the injection',
+  [injectedConfig(render(live)).sound, injectedConfig(render(live)).clickToEnter,
+    injectedConfig(render(live)).showHint],
+  [false, true, false])
 
 liveConfig.enabled[VOLATILE_REF](false)
 equal('turning it off through the reference stops the injection', render(live).length, 0)
@@ -376,8 +410,8 @@ for (const gone of ['settings.register', 'settingsScope', 'settingsOwner', 'ctx.
 check('static schema import present', /^import z from '@deepseek-ai\/schemastery'$/m.test(code))
 check('apply(ctx, config) present', /export function apply\(ctx, config\)/.test(code))
 check('Config is an exported const', /export const Config = z\.object\(\{/.test(code))
-check('every field is marked live', (code.match(/\blive\(z\./g) ?? []).length === 4,
-  String((code.match(/\blive\(z\./g) ?? []).length) + ' of 4')
+check('every field is marked live', (code.match(/\blive\(z\./g) ?? []).length === 7,
+  String((code.match(/\blive\(z\./g) ?? []).length) + ' of 7')
 check('route prefix unchanged', code.includes("const ROUTE = '/plugins/dsh-boot-animation'"))
 check('clip responses still no-store', (code.match(/'cache-control': 'no-store'/g) ?? []).length === 2)
 check('Range handling still present', code.includes('function parseRange(header, size)'))

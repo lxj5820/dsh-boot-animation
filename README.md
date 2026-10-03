@@ -25,9 +25,14 @@ DSH 启动加载动画：短片**片尾交叉溶解进界面**、多片随机、
 | 项 | 作用 |
 |---|---|
 | **开启启动动画** | 总开关。关掉就是**完全不注入**——没有覆盖层、不发任何素材请求，回到 DSH 原生启动页 |
+| **播放影片声音** | 默认开。关掉是**彻底静音**：`startClip` 不再走"先试带声、被拒再静音"那条路，直接以静音起播；声音按钮根本不生成，`audioRetry` 也不会被武装 |
+| **点鼠标直接进入** | 默认关。打开后指针按下就是**进入**，不再拿第一下去解锁音频；`enter()` 里那次"顺手再试一次开声音"也一并跳过——那个开关的意思正是"这一下只负责进" |
+| **显示底部提示文字** | 默认开。关掉只在覆盖层根节点上写 `data-hint="0"`，由一条 CSS 规则隐藏提示行；标题和进度条不动 |
 | **淡入时长** | 1 / 1.5 / 2 / 3 / 4 秒，默认 2 秒 |
 | **进入方式** | 片尾交叉溶解（默认）/ 放完再淡 / 点击才进 |
 | **素材池** | 勾选哪些片子参与随机轮播（**读的是设置本身，所以勾完立刻变**）；每行会**实际播放一遍**给出结论：时长（读到元数据就有），外加**只在有问题时**才出现的徽章——`浏览器播不了`（解码被拒）、`一直没有画面`（能开始播但 8 秒没出画面）、`未优化`（`moov` 在文件尾） |
+
+三个开关的取值都是 **`!== false` / `=== true` 的宽松判断**，不是直接取字段：老 profile 的设置文档里没有这三个键，宽松判断让它们落在文档化的默认值上（声音开、直接进入关、提示显示），和 Host 侧 `readField()` 的逐字段回退是同一套语义。
 
 **总开关不是"脚本自己判断一下然后什么都不做"**，而是 Host 侧直接不加那两行注入。这样关掉之后是真的关掉：没有覆盖层占着视口，没有配置全局变量，也没有一次素材请求。`verify-settings.mjs` 断言了这一点——关掉时注入行数是 **0**，打开时是 **2**。
 
@@ -49,7 +54,7 @@ DSH 0.2.0-rc.2 **删掉了 Host 侧 `settings.register(ns, schema)`**：现在�
 
 1. **声明，而不是注册。** 插件模块的导出对象上要有一个 `Config`（schemastery schema）。`RegistryService.plugin()` 把它记成 `runtime.Config`，`@deepseek-ai/dsh-settings` 的 `describe()` 只挑**正在运行、且解析得到 `Config`** 的条目。
 2. **命名空间 = profile 补丁里的条目 id。** 这里是 `cordis.patch.yml` 里的 `- insert: id: boot-animation`。浏览器半侧在 `src/client.js` 的 `SETTINGS_NAMESPACE` 里写同一个字符串，通过客户端的 `configForms` 服务（`whileServed` + `get`）接上——**没有第二本账**，也不再有 `settings.plugin.item` 这个槽位（现在是 `plugins.item`）。
-3. **字段必须标 `.volatile()`。** `describe()` 内部先做一次 `volatileForm(schema)` 投影，**只保留 volatile 字段**；一个 volatile 字段都没有时它返回 `undefined`，条目被整个跳过——`describe()` 连这条都不返回，`whileServed` 自然永不触发。写入侧同样：`write()`（`update`/`replace`/`mutate` 全走它）对非 volatile 路径直接抛 `Config field "..." is not volatile`。所以四个字段全部标了。
+3. **字段必须标 `.volatile()`。** `describe()` 内部先做一次 `volatileForm(schema)` 投影，**只保留 volatile 字段**；一个 volatile 字段都没有时它返回 `undefined`，条目被整个跳过——`describe()` 连这条都不返回，`whileServed` 自然永不触发。写入侧同样：`write()`（`update`/`replace`/`mutate` 全走它）对非 volatile 路径直接抛 `Config field "..." is not volatile`。所以七个字段全部标了。
 
 `.volatile()` 还有一个必须知道的后座力：**它在 `apply(ctx, config)` 里给的不是值，是一个稳定引用**（`{ get() }`，用 `Symbol.for('cosmokit.volatile.write')` 跨 ESM/CJS 副本识别）。要 `.get()` 才是当前快照——`dsh-bash-local` 也是这么读的（`config.timeoutMs.get()`）。这也是"改完刷新就生效"的机制：只有 volatile 值变化时，`@deepseek-ai/cordis-plugin-loader` 会把新快照**原地提交进同一个引用**并发出 `loader/volatile-update`，**不重启 fiber**，所以下一次 index 渲染读到的就是新值。`entry.js` 里对应的是 `readField()`。
 
@@ -195,6 +200,20 @@ ctx.inject(['slots', 'settingsScope'], (owner) => {
 
 想完全免点击：多点几次第一次（积累媒体参与度 MEI），Chrome 记住这个来源后就会**自动带声**；或在 Chrome 地址栏左侧 → 网站设置 → 声音 → 改成 **「允许」**（注意 **「自动」≠「允许」**，前者只是交给 Chrome 判断）。
 
+### 彻底静音 / 一下点进去 / 不要提示文字
+
+设置卡片里那三个开关改的就是上面这条路：
+
+| 开关 | 关掉（打开）之后 |
+|---|---|
+| **播放影片声音** | `SOUND_ON = false`：`build()` 不建声音按钮，`startClip` 跳过带声尝试直接 `attemptPlay(true, …)`，`namespace.audioBlocked` 从第一帧起就是 `'disabled'`，提示语也换成不需要解锁的那句 |
+| **点鼠标直接进入** | `CLICK_TO_ENTER = true`：`press()` 不做音频解锁，直接 `enter()`；`enter()` 里那次音频重试也跳过 |
+| **显示底部提示文字** | `SHOW_HINT = false`：根节点写 `data-hint="0"`，CSS 把 `.dshba-hint` 置为 `display:none` |
+
+三条开关都**不改变**浏览器音频策略本身：关掉声音只是让插件不再去敲那扇门。
+
+> **写这条 CSS 时踩的新坑：`[data-hint=0]` 是无效选择器。** 属性选择器的值不引号包裹时必须是标识符，而以数字开头的不是——Chrome 会**把整条规则丢掉且不报错**，开关看起来"点了没反应"。同一文件里原本的 `[data-shown=1]` 和 `[data-attention=1]`（两条）也是这个毛病，且从未生效过：`data-shown` 的显形靠的是行内 `style.opacity`，所以看不出问题；`data-attention` 的琥珀色提示则是真的没生效过，这次一并加引号修掉。`verify/verify-options.mjs` 里有一条正则守着"不许出现不带引号的数字属性值"，并在断言前先剥注释（注释里正解释着这个坏选择器）。
+
 ### 卡住时怎么诊断
 
 给地址加 `?dshbootdiag=1`，提示行会变成实时读数：
@@ -203,7 +222,7 @@ ctx.inject(['slots', 'settingsScope'], (owner) => {
 diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=1 tail=0 fade=2s stall=- err=- audio=refused
 ```
 
-`shown` = 画面是否已显形 · `rs` = readyState · `muted` = 是否静音 · `t` = 播放位置 · `dur` = 片子时长 · `paused` / `ended` = 元素自身的状态 · `done` = 片子是否已放完 · `boot` = 内核是否就绪 · **`tail` = 尾部溶解是否已经开始**（`1` 的那一刻 `t` 应该正好是 `dur − 2`） · `fade` = 标称淡入时长 · `stall` = 距上次卡顿多久 · `err` = MediaError 码 · `audio` = 声音策略结果。
+`shown` = 画面是否已显形 · `rs` = readyState · `muted` = 是否静音 · `t` = 播放位置 · `dur` = 片子时长 · `paused` / `ended` = 元素自身的状态 · `done` = 片子是否已放完 · `boot` = 内核是否就绪 · **`tail` = 尾部溶解是否已经开始**（`1` 的那一刻 `t` 应该正好是 `dur − 2`） · `fade` = 标称淡入时长 · `stall` = 距上次卡顿多久 · `err` = MediaError 码 · `audio` = 声音策略结果（`ok` / `refused` / `muted-by-user`，关掉声音时是 `disabled`）。
 
 想知道"淡入是不是在 13 秒开始"，就看这一行：`dur=15.1` 时 `tail` 应该在 `t≈13.1` 翻成 `1`。`dur` 比 `t` 大说明还在放；`boot=0` 说明内核还没就绪（此时即使进了片尾窗口也不会淡，这是故意的）。
 
@@ -332,9 +351,12 @@ manifest 给每条 src 拼一个 **`?v=<mtime>-<大小>`** 版本号：**同名�
 注入的配置行在 `entry.js` 末尾：
 
 - `holdMs` — 超时放开时间，默认 15000
+- `fadeMs` / `enterMode` / `sound` / `clickToEnter` / `showHint` — 五项都来自设置卡片，逐字段回退到 `DEFAULT_SETTINGS`
 - 视觉参数（蒙版半径、底色、字标）都在 `src/boot-screen.js` 顶部的 `style()` 里
 
 改完 `src/boot-screen.js` 要重启 dsh（脚本内容是进程启动时读一次）。
+
+`tools/preview.mjs` 现在也认这几个开关的查询参数（`?sound=0&clickToEnter=1&hint=0&enterMode=click&fadeMs=4000`），不装进 DSH 也能把注入后的真实配置走一遍。
 
 ## 本地预览（不装进 DSH 也能看）
 

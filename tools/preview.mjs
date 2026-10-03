@@ -93,7 +93,22 @@ const pageServer = createServer((req, res) => {
   void (async () => {
     if (url === '/' || url === '/index.html') {
       const screen = await readFile(join(PACKAGE, 'src', 'boot-screen.js'), 'utf8')
-      const cfg = JSON.stringify({ base: '', manifest: `http://127.0.0.1:${String(CLIP_PORT)}/clips.json`, holdMs: 15000 })
+      // The screen's settings come from the query string, so the injection the
+      // Host would emit can be reproduced exactly — `?sound=0` is the silence
+      // switch, `?clickToEnter=1` the direct entry, `?hint=0` the hidden hint,
+      // and `?enterMode=click` / `?fadeMs=4000` the other two fields. Anything
+      // absent falls back to the Host's own default rather than being sent.
+      const query = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+      const cfg = JSON.stringify({
+        base: '',
+        manifest: `http://127.0.0.1:${String(CLIP_PORT)}/clips.json`,
+        holdMs: 15000,
+        ...(query.get('fadeMs') === null ? {} : { fadeMs: Number(query.get('fadeMs')) }),
+        ...(query.get('enterMode') === null ? {} : { enterMode: query.get('enterMode') }),
+        ...(query.get('sound') === null ? {} : { sound: query.get('sound') !== '0' }),
+        ...(query.get('clickToEnter') === null ? {} : { clickToEnter: query.get('clickToEnter') === '1' }),
+        ...(query.get('hint') === null ? {} : { showHint: query.get('hint') !== '0' }),
+      })
       // The fake boot page mirrors the kernel's DOM contract: `[data-dsh-boot]`,
       // `[data-dsh-boot-spinner]`, and the `--dsh-boot-arc` custom property the
       // real page writes as entries activate.

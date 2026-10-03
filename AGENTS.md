@@ -6,9 +6,9 @@ silently, and how to prove a change is safe.
 
 > **Porting note (DSH 0.2.0-rc.2).** The Host settings contract changed: a plugin
 > no longer *registers* a settings namespace, it *declares* `Config`. Everything
-> below reflects that. The `verify-*` suites this file names belong to the
-> author's working copy and do **not** ship with this package — see
-> [Verifying a change](#verifying-a-change) for what can be run here.
+> below reflects that. The wide `verify-*` set the README names belongs to the
+> author's working copy; what actually ships here is the three suites under
+> [`verify/`](verify/) — see [Verifying a change](#verifying-a-change).
 
 Human-facing usage lives in [MANUAL.md](MANUAL.md). The long forensic record —
 every bug, why it happened, what the evidence was — is [README.md](README.md).
@@ -61,6 +61,8 @@ Every line here cost a real debugging session. They are not style preferences.
 | **Never read/write a CJK-bearing file with PowerShell** — source, data or the user's config alike. Use the file tools; verify with Node `readFileSync(..., 'utf8')`. | PowerShell 5.1 decodes BOM-less UTF-8 as GBK, and a `Set-Content` round-trip destroys every Chinese character — once collapsed `'…'` into `鈥?` and broke the script. The same rule covers files this package does not own: `cordis.patch.yml` carries a provider `displayName`, and the `Get-Content`/`Set-Content` pair in `tools/uninstall.ps1` turned it into mojibake and added a BOM. When a `.ps1` genuinely must rewrite such a file, go through .NET — `[System.IO.File]::ReadAllLines($p, $utf8NoBom)` / `WriteAllLines($p, $lines, $utf8NoBom)` with `New-Object System.Text.UTF8Encoding($false)` — because on 5.1 `Set-Content -Encoding utf8` means *UTF-8 with BOM*, which is still a change to a file that is not the script's to change. |
 | **A step that only checks must not repair.** | `tools/install.ps1`'s last step guesses which port dsh is on; when the guess missed it reported FAILED and rolled back a fully working install. A check that cannot tell "broken" from "not measured" has to say which one it is and leave the state alone. |
 | **No backtick anywhere inside a CSS blob** (the screen's `style()` string, the card's `CSS` string). | The string ends early and the build keeps the *previous* artifact. It looks like the change had no effect. |
+| **An attribute selector with a numeric value must quote it** — `[data-hint="0"]`, never `[data-hint=0]`. | An unquoted value must be a CSS identifier, and one starting with a digit is not, so Chrome drops the ENTIRE rule without a word. The switch looks wired and does nothing. `[data-shown=1]` and both `[data-attention=1]` rules in this package had never applied (only the inline `style.opacity` in `reveal()` hid it). `verify/verify-options.mjs` asserts it with a regex, comments stripped first. |
+| **A scratch-copy suite must copy with `dereference: true`.** | Installed, `node_modules/@deepseek-ai/schemastery` is a symlink; `cpSync(..., { recursive: true })` preserves it, so the scratch tree points back at the real library. `verify-degraded.mjs`'s "rename `.volatile()` away" then rewrote the INSTALLED schemastery and silently disarmed every settings card in the deployment. The suites now copy real files and assert the scratch is not a link before rewriting. |
 | **Read optional services with `ctx.inject([...], (owner) => owner.get(name))`.** Never `ctx.get(name)`. | `ctx.get` is a one-shot read that races activation and silently answers `undefined`; the card then never registers and there is no error anywhere. Every other client plugin in the deployment uses the `ctx.inject` form. |
 | **The client half declares no `inject`.** | A required service leaves the fiber PENDING in a profile that lacks it, `apply` never runs, `clientReady` is never sent, and the animation refuses to hand over. |
 | **Every settings field the card edits must be marked `.volatile()`** — and the schema library that resolves beside this package must actually have the method. | `@deepseek-ai/dsh-settings` projects volatile fields and nothing else: a `Config` with none is not described at all, so the namespace is never served, the card's `whileServed` never fires, and the settings row is simply absent with no error. The 3.18.1 build linked next to a workspace checkout has no `.volatile()` at all — calling it would throw while `entry.js` is being evaluated; `LIVE_CAPABLE` probes for it and warns instead. |
@@ -101,13 +103,21 @@ settings card does not; `apply` warns with exactly that sentence.
 ## Verifying a change
 
 ```sh
-node build-client.mjs      # only if src/client.js changed
+node build-client.mjs          # only if src/client.js changed
+node verify/verify-entry.mjs   # Host half: Config, injection, manifest route
+node verify/verify-degraded.mjs # the old-schema-library degradation path
+node verify/verify-options.mjs  # the three interaction switches, against a stub DOM
 ```
 
-The `verify-*` suites and the `verify-all.mjs` aggregator belong to the author's
-working copy and are **not part of this tree** (the banner at the top of
-[README.md](README.md) says the same). What `tools/` holds here is the media and
-preview tooling:
+`verify/` **is** part of this tree, and those three suites are what it can run
+offline with no DSH process, no ports and no prompts. `verify-entry.mjs` and
+`verify-degraded.mjs` cover the Host half; `verify-options.mjs` runs
+`src/boot-screen.js` itself in a minimal DOM, because the screen is a script text
+and a grep for `cfg.sound` would pass on a file that greps it and ignores it.
+
+The wider `verify-*` set and the `verify-all.mjs` aggregator named in
+[README.md](README.md) belong to the author's working copy and are **not** in this
+tree. What `tools/` holds here is the media and preview tooling:
 
 | Tool | What it is for |
 |---|---|
@@ -130,9 +140,10 @@ node --check entry.js
 node -e "import('./entry.js').then(m => console.log(Object.keys(m), m.Config.toJSON()))"
 ```
 
-`verify-entry.mjs` and `verify-degraded.mjs` from the porting session (kept in the
-workspace copy of this package, not here) do exactly that with a stub Host context
-and re-implementations of the settings service's own predicates.
+[`verify/verify-entry.mjs`](verify/verify-entry.mjs) does exactly that with a stub
+Host context and re-implementations of the settings service's own predicates;
+[`verify/verify-degraded.mjs`](verify/verify-degraded.mjs) proves the same module
+still evaluates when the resolved schema library lacks `.volatile()`.
 
 ## When someone reports something
 
@@ -141,7 +152,7 @@ and re-implementations of the settings service's own predicates.
 | "Only the background shows" | The hint line (it names the failed clip and reason), then the card's pool rows | A clip that never paints. The loader skips it after 6s and says so. |
 | "It works after a hard reload but not a normal one" | Response headers on the clip route | Something became cacheable. It must all be `no-store`. |
 | "No card in Settings" | Console for `boot-animation:` warnings | The `Config` schema was not resolved, no field is volatile (`volatileForm()` drops the entry), or the patch `id` and `SETTINGS_NAMESPACE` disagree. The warning names the first case outright. |
-| "No sound" | The audio-policy path in `toggleSound` / `startClip` | Expected until the first click; Chromium will not autoplay unmuted. Confirm the hint says 开声音. |
+| "No sound" | The audio-policy path in `toggleSound` / `startClip`, then the card's **播放影片声音** switch | Expected until the first click; Chromium will not autoplay unmuted. Confirm the hint says 开声音 — with the switch off there is deliberately no sound hint and no button. |
 | "It never enters" | The bound table in README ("启动路径上每个走不下去的地方都有上界") | Every route has a bound; if one fired, the hint line says which. |
 | "A new clip does not play" | The card's badges | `未优化` → run `tools/apply-faststart.bat`. |
 

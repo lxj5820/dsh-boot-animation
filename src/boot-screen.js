@@ -32,6 +32,16 @@
   // both finish together; `end` plays the clip out and then fades; `click` never
   // enters on its own and waits for the user.
   var ENTER_MODE = cfg.enterMode === 'end' || cfg.enterMode === 'click' ? cfg.enterMode : 'tail'
+  // Sound off is not "start muted": it is the absence of every audio path. The
+  // unmuted attempt, the sound button and the retry that a press would otherwise
+  // fire are all skipped, so nothing can bring the sound back for this screen.
+  // A missing key means on, which is the behaviour every older Host row had.
+  var SOUND_ON = cfg.sound !== false
+  // A press enters instead of unlocking audio. See press().
+  var CLICK_TO_ENTER = cfg.clickToEnter === true
+  // The bottom hint line. Off hides that one element; the title and the progress
+  // bar are not "instructions" and stay.
+  var SHOW_HINT = cfg.showHint !== false
   // A clip shorter than this cannot carry the dissolve — it would have to start
   // before there is any picture to dissolve. Those play out and then fade instead.
   var TAIL_MIN_MS = FADE_MS * 2
@@ -124,6 +134,8 @@
       'opacity:0;transition:opacity 1.1s ease;',
       '-webkit-mask-image:radial-gradient(ellipse 88% 82% at 50% 50%,#000 62%,transparent 100%);',
       'mask-image:radial-gradient(ellipse 88% 82% at 50% 50%,#000 62%,transparent 100%)}',
+      // Quoted for the same reason as the hint switch below: `[data-shown=1]` is
+      // an invalid selector and the rule never applied.
       '.dshba-video[data-shown="1"]{opacity:1}',
       '.dshba-veil{position:absolute;inset:0;pointer-events:none;',
       'background:radial-gradient(ellipse 86% 78% at 50% 50%,transparent 44%,rgba(4,10,18,.45) 78%,rgba(2,6,12,.7) 100%)}',
@@ -139,6 +151,15 @@
       'box-shadow:0 0 12px rgba(143,216,255,.75);transition:width .45s ease}',
       '.dshba-hint{font-size:12px;color:#8fb3d4;letter-spacing:.12em;opacity:0;',
       'transition:opacity .5s ease}',
+      // The switch only removes the sentence. `display:none` rather than
+      // `opacity:0` so the line cannot be revealed later by the state rules
+      // below, which set the opacity this class would otherwise fight.
+      //
+      // The value is QUOTED. An unquoted `0` is not an identifier, so
+      // `[data-hint=0]` is an invalid selector, Chrome drops the whole rule, and
+      // the switch silently does nothing. The attention rules below carried the
+      // same bug with `[data-attention=1]` and had never applied.
+      '.dshba[data-hint="0"] .dshba-hint{display:none}',
       '.dshba[data-state=ready] .dshba-hint{opacity:.95}',
       '.dshba[data-attention="1"] .dshba-hint{opacity:1;color:#ffd79a;letter-spacing:.04em}',
       '.dshba[data-attention="1"] .dshba-fill{background:linear-gradient(90deg,#d99a4f,#ffd79a)}',
@@ -160,6 +181,7 @@
     root.setAttribute('role', 'dialog')
     root.setAttribute('aria-label', 'DSH boot animation')
     root.setAttribute('data-state', 'idle')
+    root.setAttribute('data-hint', SHOW_HINT ? '1' : '0')
     var video = document.createElement('video')
     video.className = 'dshba-video'
     video.muted = true
@@ -191,22 +213,28 @@
     // heard on the way out. This button is the gesture that turns sound on while
     // the screen stays put, and once the origin has that engagement recorded the
     // clip starts with sound on later launches with no interaction at all.
-    var sound = document.createElement('button')
-    sound.className = 'dshba-sound'
-    sound.type = 'button'
-    sound.textContent = '🔇 开声音'
-    sound.addEventListener('pointerdown', function (event) { event.stopPropagation() }, true)
-    sound.addEventListener('click', function (event) {
-      event.preventDefault()
-      event.stopPropagation()
-      toggleSound()
-    })
+    //
+    // With sound off there is no button at all, because there is nothing it could
+    // be allowed to do: a control that only ever fails is worse than no control.
+    var sound = null
+    if (SOUND_ON) {
+      sound = document.createElement('button')
+      sound.className = 'dshba-sound'
+      sound.type = 'button'
+      sound.textContent = '🔇 开声音'
+      sound.addEventListener('pointerdown', function (event) { event.stopPropagation() }, true)
+      sound.addEventListener('click', function (event) {
+        event.preventDefault()
+        event.stopPropagation()
+        toggleSound()
+      })
+    }
     ui.appendChild(title)
     ui.appendChild(bar)
     ui.appendChild(hint)
     root.appendChild(video)
     root.appendChild(veil)
-    root.appendChild(sound)
+    if (sound) root.appendChild(sound)
     root.appendChild(ui)
     // The video part is a live view, not a snapshot: a clip that fails to play is
     // replaced by a fresh element, so anything holding the old node would pause
@@ -231,6 +259,10 @@
     el: parts.root,
     bootedAt: null,
     failed: false,
+    // `null` means audio is fine (or was never in question); anything else is the
+    // reason the clip is silent. Sound is off from the first frame when the
+    // setting says so, so the hint never advertises an unlock that cannot happen.
+    audioBlocked: SOUND_ON ? null : 'disabled',
     // Called by the browser half once the client roster activates. Boot has then
     // finished, so the screen may announce that entering is available — and if
     // the clip already played itself out while the kernel was still starting,
@@ -248,12 +280,22 @@
   }
   globalThis.__DSH_BOOT_ANIM__ = namespace
 
-  // Three hints, because the screen genuinely has three states: while the clip is
+  // The hints, one per state the screen can actually be in: while the clip is
   // silent the first press means "let me hear it", once sound is on a press means
   // "skip the rest", and in click mode a press is the only way in at all. Saying
   // so removes the guesswork about why nothing happened on the first click.
-  var HINT_SOUND = ENTER_MODE === 'click' ? '点击进入' : '播完自动进入 · 点一下提前进'
-  var HINT_SILENT = ENTER_MODE === 'click' ? '点一下开声音 · 再点进入' : '点一下开声音 · 播完自动进入'
+  //
+  // Two of the switches remove the two-step entirely: with sound off there is
+  // nothing to unlock, and with click-to-enter the first press is the way in — in
+  // both cases a sentence about unlocking audio would be a lie.
+  var HINT_ENTER = ENTER_MODE === 'click' ? '点击进入' : '播完自动进入 · 点一下提前进'
+  var HINT_UNLOCK = ENTER_MODE === 'click' ? '点一下开声音 · 再点进入' : '点一下开声音 · 播完自动进入'
+  var HINT_DIRECT = ENTER_MODE === 'click' ? '点击进入' : '点一下直接进入'
+  var TWO_STEP = SOUND_ON && !CLICK_TO_ENTER
+  // With sound off there is nothing to unlock, so the plain entry hint is the
+  // true one; with click-to-enter the press skips audio, and the hint says that.
+  var HINT_SOUND = CLICK_TO_ENTER ? HINT_DIRECT : HINT_ENTER
+  var HINT_SILENT = TWO_STEP ? HINT_UNLOCK : HINT_SOUND
 
   function setState(value) {
     parts.root.setAttribute('data-state', value)
@@ -349,6 +391,8 @@
    * succeeds where the initial muted-then-unmuted attempt could not.
    */
   function toggleSound() {
+    // Nothing to toggle when the option is off; the button is not even built.
+    if (!SOUND_ON) return
     var video = parts.video()
     if (!video.muted) {
       video.muted = true
@@ -444,7 +488,10 @@
     // only meaningful while there are still frames left to hear it over.
     var finished = video.ended === true
     var live = !finished && !video.paused && tail !== true
-    if (!finished && tail !== true && typeof audioRetry === 'function') audioRetry()
+    // The retry that lets a skip carry the sound out with the picture. Not with
+    // click-to-enter: there the press is only ever the entry, and turning audio on
+    // as a side effect of leaving is exactly the second meaning the option removes.
+    if (!CLICK_TO_ENTER && !finished && tail !== true && typeof audioRetry === 'function') audioRetry()
 
     // A clip that is still RUNNING and is being skipped past is moved out of the
     // overlay before the overlay goes away. Two reasons, both required: removing
@@ -530,7 +577,11 @@
     // That case is reachable — the clip can end while the kernel is still
     // starting — and pressing then means "let me in", not "replay that".
     var finished = parts.video().ended === true
-    if (!finished && namespace.audioBlocked !== null && typeof audioRetry === 'function') {
+    // Click-to-enter skips the unlock: this press IS the entry, so there is no
+    // first press spent on audio and no second press needed. With sound off the
+    // condition below is already false (no audioRetry was ever armed), and this
+    // flag is what makes the same shortcut explicit.
+    if (!CLICK_TO_ENTER && !finished && namespace.audioBlocked !== null && typeof audioRetry === 'function') {
       audioRetry()
       namespace.audioBlocked = null
       if (!namespace.failed) parts.hint.textContent = HINT_SOUND
@@ -694,7 +745,7 @@
         var attempt = 0
         // The retry lives in the outer scope so the entering gesture can reach it;
         // this flag records why the clip is silent, for the hint to report.
-        namespace.audioBlocked = null
+        namespace.audioBlocked = SOUND_ON ? null : 'disabled'
 
         /**
          * Start a clip. Sound first, muted only as the fallback.
@@ -735,6 +786,16 @@
               attemptPlay(false, function () {/* stays silent */})
             }
             attemptPlay(true, blocked)
+          }
+          // Sound is off for good: skip the unmuted attempt and the retry entirely
+          // rather than try them and have them refused. Muted autoplay is also the
+          // one start the audio policy always permits, so this path cannot land in
+          // `blocked` for a policy reason.
+          if (!SOUND_ON) {
+            namespace.audioBlocked = 'disabled'
+            audioRetry = null
+            attemptPlay(true, blocked)
+            return
           }
           // The unmuted attempt may neither resolve nor reject on a slow or
           // conflicting load, and waiting on it forever is what leaves the screen
