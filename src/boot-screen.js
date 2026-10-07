@@ -63,6 +63,15 @@
   // reports `duration = Infinity` — so waiting for an end that cannot come would
   // hold the screen forever. This bounds that, and only that.
   var ENDLESS_MS = 20000
+  // How long a clip that is being skipped past may keep playing after the overlay
+  // is gone. The detached element has always been given this window — it is what
+  // stops a skip from ending the track on the frame the picture leaves — and it
+  // still is: what changed is that the sound now spends the window fading to
+  // silence instead of sitting at full level and then being cut at the end of it.
+  // The audio ramp therefore covers `span + AUDIO_GRACE_MS` whenever the clip
+  // outlives the exit (see enter), and only `span` when the clip's own end is what
+  // ends the exit — there the track stops with the picture by itself.
+  var AUDIO_GRACE_MS = 1300
   var ARC_MIN = 72
   var ARC_SPAN = 216
   var cache = { startedAt: Date.now(), current: null, loaded: false }
@@ -481,19 +490,6 @@
   }
 
   /**
-   * Dissolve the overlay away and hand the app over.
-   *
-   * @param fadeMs - how long the dissolve takes. The tail dissolve passes the
-   *   clip's actual remaining time so the fade lands exactly on the last frame
-   *   instead of a fixed guess; everything else passes nothing and gets FADE_MS.
-   * @param tail - true when the clip is still playing and will reach its own end
-   *   during the dissolve. The clip then STAYS inside the overlay and fades with
-   *   it, which is the whole effect: the picture dissolves into the app and the
-   *   last frame is gone exactly when the clip is. Detaching it to `body` here —
-   *   as a skip does — would park an opaque video on top of the app for the whole
-   *   dissolve and erase the crossfade.
-   */
-  /**
    * Call back once the clip has a frame to show — starting it is not that moment.
    *
    * A resolved `play()` promise only means the element left the paused state. It
@@ -537,6 +533,76 @@
     })
   }
 
+  /**
+   * Take the clip's own audio to silence over the exit.
+   *
+   * The picture has always dissolved into the app; the sound did not follow it.
+   * A skipped clip was detached and kept playing at full level while the app was
+   * already up, and the tail dissolve ended its picture with the track still at
+   * full gain. Both are the same missing piece, so one ramp covers every exit.
+   *
+   * Its duration is the exit's own span — which is what makes the sound and the
+   * picture reach their end on the same frame — plus the grace a detached clip is
+   * allowed after the overlay is gone (`span + AUDIO_GRACE_MS`, computed by the
+   * caller). A fixed duration here would drift away from a tail dissolve, whose
+   * span is the clip's remaining time rather than FADE_MS.
+   *
+   * Linear gain, not an equal-power curve: this is a fade to silence over one or
+   * two seconds, where the straight amplitude ramp is what sounds like the
+   * picture fading; an equal-power shape would only hold the last moment louder.
+   *
+   * Both a frame loop and a deadline are needed. rAF is what makes it smooth
+   * while the tab is visible, and it also stops when the tab is not — while the
+   * exit's own timers keep running. The deadline is therefore what guarantees
+   * silence at the end of the exit no matter what the compositor did.
+   * @param video - the clip whose audio is playing.
+   * @param span - the ramp duration in ms: the exit's span, and for a detached
+   *   clip that same span plus AUDIO_GRACE_MS.
+   */
+  function fadeOutClipAudio(video, span) {
+    var from = video.volume
+    // Nothing to take down: a muted element is already silent, and a volume that
+    // is not a positive number (some environments report NaN before metadata) has
+    // no level to ramp from.
+    if (video.muted || !(from > 0)) return
+    var startedAt = Date.now()
+    var done = false
+    var silence = function () {
+      if (done) return
+      done = true
+      video.volume = 0
+    }
+    var step = function () {
+      if (done) return
+      var progress = (Date.now() - startedAt) / span
+      if (progress >= 1) {
+        silence()
+        return
+      }
+      video.volume = from * (1 - progress)
+      nextFrame(step)
+    }
+    step()
+    globalThis.setTimeout(silence, span)
+  }
+
+  /**
+   * Dissolve the overlay away and hand the app over.
+   *
+   * The duration below is also the audio's: the clip's own track is ramped to
+   * silence over that same span by fadeOutClipAudio, so the sound stops exactly
+   * when the picture it belonged to does.
+   *
+   * @param fadeMs - how long the dissolve takes. The tail dissolve passes the
+   *   clip's actual remaining time so the fade lands exactly on the last frame
+   *   instead of a fixed guess; everything else passes nothing and gets FADE_MS.
+   * @param tail - true when the clip is still playing and will reach its own end
+   *   during the dissolve. The clip then STAYS inside the overlay and fades with
+   *   it, which is the whole effect: the picture dissolves into the app and the
+   *   last frame is gone exactly when the clip is. Detaching it to `body` here —
+   *   as a skip does — would park an opaque video on top of the app for the whole
+   *   dissolve and erase the crossfade.
+   */
   function enter(fadeMs, tail) {
     if (parts.root.getAttribute('data-state') === 'leaving') return
     entered = true
@@ -560,11 +626,11 @@
 
     // A clip that is still RUNNING and is being skipped past is moved out of the
     // overlay before the overlay goes away. Two reasons, both required: removing
-    // the overlay removes a <video> inside it, which would cut the sound off; and
-    // the overlay must not keep painting over the app while it exits. Detached,
-    // the element keeps playing its audio with nothing on screen, which is what
-    // stops a skip from chopping the sound mid-phrase. A clip that already ended
-    // has no audio left to protect, so it simply fades out with everything else.
+    // the overlay removes a <video> inside it, and an element cut out of the
+    // document mid-ramp is the very hard stop this fade exists to remove; and the
+    // overlay must not keep painting over the app while it exits. Detached, the
+    // element plays its ramp out with nothing on screen. A clip that already ended
+    // has no audio left to fade, so it simply goes out with everything else.
     var standalone = false
     if (live && video.parentNode && video.parentNode.parentNode === document.body) {
       var box = video.getBoundingClientRect()
@@ -578,6 +644,17 @@
       document.body.appendChild(video)
       standalone = true
     }
+
+    // The sound leaves with the picture, over the same span the picture takes —
+    // plus, when the clip is detached above and therefore still has track left,
+    // the grace it has always been allowed after the overlay is gone. That window
+    // used to be played at full level and cut at the end of it; it is now spent
+    // fading, so the ramp covers `span + AUDIO_GRACE_MS` and reaches zero exactly
+    // where the element is stopped. A tail dissolve adds nothing: its clip ends by
+    // itself at the end of `span`, so `span` is where its sound has to be gone.
+    // Started after the detach, because removing the overlay is what would cut the
+    // ramp short.
+    if (!finished) fadeOutClipAudio(video, standalone ? span + AUDIO_GRACE_MS : span)
 
     // The WHOLE overlay fades as a unit — background gradient, clip and chrome
     // together — and is then removed. Fading only the chrome first, as an earlier
@@ -600,8 +677,11 @@
     }, span + 100)
 
     if (standalone) {
-      // Fade the detached clip out over the second half of the exit, then stop
-      // it: the sound is allowed to outlive the picture it belonged to.
+      // The detached clip keeps its own picture for the first half of the exit and
+      // loses it over the second, then is stopped at the end of its grace — the
+      // same deadline it always had. What changed is that the ramp has taken it to
+      // silence by then, so this pause is cleanup rather than the cut. The ramp's
+      // own deadline was scheduled first, so it wins the tie and runs first.
       globalThis.setTimeout(function () { video.style.opacity = '0' }, span / 2)
       globalThis.setTimeout(function () {
         try {
@@ -610,15 +690,17 @@
           /* already stopped */
         }
         if (video.parentNode) video.parentNode.removeChild(video)
-      }, span + 1300)
+      }, span + AUDIO_GRACE_MS)
     } else {
+      // A tail dissolve's clip is over by the end of `span` (the ramp is exactly
+      // that long), so the pause lands just after the ramp and the clip's own end.
       globalThis.setTimeout(function () {
         try {
           video.pause()
         } catch (error) {
           /* an unplayed video needs no pause */
         }
-      }, span + 400)
+      }, span + 150)
     }
   }
 

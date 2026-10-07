@@ -72,6 +72,7 @@ Every line here cost a real debugging session. They are not style preferences.
 | **A resolved `play()` promise is not a picture.** Keep the 6-second retry armed until a frame is really there. | A clip that starts and never paints leaves the gradient up forever, with no error and no next attempt. |
 | **`faststart.mjs` must assert the RESULT** — that the output has `moov` before `mdat`. | It was written checking only the *plan* and its own payload proof, both of which are vacuously true for a file that did not move. It reported success for two sessions while writing byte-identical copies, so "I remuxed it" changed nothing. |
 | **Strip comments before any regex assertion on an artifact.** | The bundles are comment-preserving concatenations, so prose explaining an old approach is matched as if it were the approach. This happened twice. |
+| **The exit's audio fade must reuse the exit's own `span`** — plus `AUDIO_GRACE_MS` only for a clip that is detached and still playing, whose stop deadline stays `span + 1300`. | A fixed fade duration drifts away from a tail dissolve, whose span is the clip's remaining time; and handing the grace to the tail path leaves the track audible after the clip itself has ended. |
 | **Do not hardcode a user asset's name in a test.** Read it from the manifest. | The clips get renamed; the suite then fails for a reason that has nothing to do with the code. |
 | **Do not `spawnSync` with piped stdio.** Import the module and call the function. | The agent sandbox refuses a child process whose output is captured through a pipe (`EPERM`). `stdio: 'inherit'` works, which is how the author's aggregator spawns its children. |
 | **Suites must be runnable together** — no interactive prompts, no fixed ports. | A suite that only passes alone is a defect in the suite. |
@@ -155,6 +156,7 @@ still evaluates when the resolved schema library lacks `.volatile()`.
 | "It works after a hard reload but not a normal one" | Response headers on the clip route | Something became cacheable. It must all be `no-store`. |
 | "No card in Settings" | Console for `boot-animation:` warnings | The `Config` schema was not resolved, no field is volatile (`volatileForm()` drops the entry), or the patch `id` and `SETTINGS_NAMESPACE` disagree. The warning names the first case outright. |
 | "No sound" | The audio-policy path in `toggleSound` / `startClip`, then the card's **播放影片声音** switch | Expected until the first click; Chromium will not autoplay unmuted. Confirm the hint says 开声音 — with the switch off there is deliberately no sound hint and no button. |
+| "The sound drags on after the picture is gone" or "the audio cuts off mid-phrase on the way out" | `fadeOutClipAudio` and the span `enter()` computed | The ramp is not running: the element was already paused/ended (nothing left to fade), it is muted (nothing audible), or the overlay was removed before the ramp finished. |
 | "It never enters" | The bound table in README ("启动路径上每个走不下去的地方都有上界") | Every route has a bound; if one fired, the hint line says which. |
 | "A new clip does not play" | The card's badges | `未优化` → run `tools/apply-faststart.bat`. |
 
