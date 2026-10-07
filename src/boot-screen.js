@@ -12,6 +12,12 @@
 //
 // It deliberately does not touch React or the shell module table: it needs no
 // framework and must survive the UI renderer failing.
+//
+// One further entry exists for the settings card: `namespace.preview({ name, ... })`
+// re-runs this same overlay on demand, for one named clip, so a clip can be judged
+// as the boot animation without restarting DSH. It rebuilds the DOM from the
+// settings the card currently shows and resets the run state; the boot path itself
+// is untouched, because it has already finished by the time that button is reachable.
 
 /* eslint-disable */
 ;(function () {
@@ -280,22 +286,122 @@
   }
   globalThis.__DSH_BOOT_ANIM__ = namespace
 
+  /**
+   * Preview state: non-null only while a preview is on screen.
+   *
+   * The boot path never sets it, so every branch below that reads it is the same
+   * code path it always was for a real start.
+   */
+  var previewName = null
+  var previewDone = null
+
+  /**
+   * Adopt the settings a preview was asked for.
+   *
+   * Each of these is a `var` that the machinery below reads at call time, so
+   * reassigning is enough — but it MUST happen before `build()`, because the hint
+   * line, the sound button, the loop flag and the stylesheet's default fade are all
+   * decided there.
+   * @param options - the settings the card currently shows.
+   */
+  function applyPreviewSettings(options) {
+    if (typeof options.fadeMs === 'number' && options.fadeMs >= 300 && options.fadeMs <= 5000) {
+      FADE_MS = Math.round(options.fadeMs)
+    }
+    TAIL_MIN_MS = FADE_MS * 2
+    if (options.enterMode === 'tail' || options.enterMode === 'end' || options.enterMode === 'click') {
+      ENTER_MODE = options.enterMode
+    }
+    SOUND_ON = options.sound !== false
+    CLICK_TO_ENTER = options.clickToEnter === true
+    SHOW_HINT = options.showHint !== false
+    computeHints()
+  }
+
+  /**
+   * Run the real overlay once, now, on an already-booted page, for one named clip.
+   *
+   * The settings card's 预览 button is the only caller, and three things make this
+   * the same screen rather than an imitation of it:
+   *
+   *   - the overlay is REBUILT from the settings the card currently shows, so the
+   *     hint line, the sound button and the fade are the ones that would really
+   *     apply (the DOM built at page load was decided by the values that page was
+   *     served with);
+   *   - the clip is the named one instead of a random pick, and the rotation
+   *     history in sessionStorage is deliberately left alone;
+   *   - the exit is the same `enter()` the boot path uses, so the dissolve, the
+   *     sound retry, the detached-clip handling and the caption hand-back are all
+   *     the real ones. No kernel boot page is involved, so the progress bar is
+   *     simply filled.
+   *
+   * @param options - `{ name, fadeMs, enterMode, sound, clickToEnter, showHint, onDone }`.
+   * @returns true when a preview started, false when one is already running or the
+   *   request is malformed.
+   */
+  namespace.preview = function (options) {
+    if (typeof options !== 'object' || options === null) return false
+    if (typeof options.name !== 'string' || options.name === '') return false
+    if (previewName !== null) return false
+
+    applyPreviewSettings(options)
+    parts = build()
+    namespace.el = parts.root
+    wireRoot(parts.root)
+    previewName = options.name
+    previewDone = typeof options.onDone === 'function' ? options.onDone : null
+
+    // Every piece of run state the first pass left behind. Missing any one of them
+    // surfaces as a preview that cannot be entered (`entered`), never hands over
+    // (`clipDone`), or plays nothing at all (`cache.loaded`).
+    entered = false
+    clipDone = false
+    nudgeTail = null
+    audioRetry = null
+    cache = { startedAt: Date.now(), current: null, loaded: false }
+    namespace.failed = false
+    namespace.failures = []
+    namespace.audioBlocked = SOUND_ON ? null : 'disabled'
+    namespace.clipEndedAt = null
+    namespace.unknownLength = false
+    namespace.lastStall = null
+    namespace.tailEntered = false
+    // The caption probe is restyled for the preview and handed back on the way out,
+    // so these flags are cleared rather than carried over as "already restored".
+    captionDone = false
+    captionStyle = null
+    // A preview has no kernel boot page to wait for and the shell is by definition
+    // already up: this is what makes the hand-off possible without a clientReady
+    // call that nobody is going to make a second time.
+    namespace.bootedAt = Date.now()
+
+    mount()
+    return true
+  }
+
   // The hints, one per state the screen can actually be in: while the clip is
   // silent the first press means "let me hear it", once sound is on a press means
   // "skip the rest", and in click mode a press is the only way in at all. Saying
   // so removes the guesswork about why nothing happened on the first click.
   //
-  // Two of the switches remove the two-step entirely: with sound off there is
-  // nothing to unlock, and with click-to-enter the first press is the way in — in
-  // both cases a sentence about unlocking audio would be a lie.
-  var HINT_ENTER = ENTER_MODE === 'click' ? '点击进入' : '播完自动进入 · 点一下提前进'
-  var HINT_UNLOCK = ENTER_MODE === 'click' ? '点一下开声音 · 再点进入' : '点一下开声音 · 播完自动进入'
-  var HINT_DIRECT = ENTER_MODE === 'click' ? '点击进入' : '点一下直接进入'
-  var TWO_STEP = SOUND_ON && !CLICK_TO_ENTER
-  // With sound off there is nothing to unlock, so the plain entry hint is the
-  // true one; with click-to-enter the press skips audio, and the hint says that.
-  var HINT_SOUND = CLICK_TO_ENTER ? HINT_DIRECT : HINT_ENTER
-  var HINT_SILENT = TWO_STEP ? HINT_UNLOCK : HINT_SOUND
+  // Derived in a function rather than at declaration because a PREVIEW can change
+  // every setting this depends on and then rebuild the overlay: the strings have to
+  // be recomputed for the settings the preview was asked for, not the ones this
+  // page was served with.
+  var HINT_ENTER, HINT_UNLOCK, HINT_DIRECT, TWO_STEP, HINT_SOUND, HINT_SILENT
+
+  function computeHints() {
+    HINT_ENTER = ENTER_MODE === 'click' ? '点击进入' : '播完自动进入 · 点一下提前进'
+    HINT_UNLOCK = ENTER_MODE === 'click' ? '点一下开声音 · 再点进入' : '点一下开声音 · 播完自动进入'
+    HINT_DIRECT = ENTER_MODE === 'click' ? '点击进入' : '点一下直接进入'
+    TWO_STEP = SOUND_ON && !CLICK_TO_ENTER
+    // With sound off there is nothing to unlock, so the plain entry hint is the
+    // true one; with click-to-enter the press skips audio, and the hint says that.
+    HINT_SOUND = CLICK_TO_ENTER ? HINT_DIRECT : HINT_ENTER
+    HINT_SILENT = TWO_STEP ? HINT_UNLOCK : HINT_SOUND
+  }
+
+  computeHints()
 
   function setState(value) {
     parts.root.setAttribute('data-state', value)
@@ -527,11 +633,29 @@
     setState('leaving')
     globalThis.setTimeout(function () {
       if (parts.root.parentNode) parts.root.parentNode.removeChild(parts.root)
+      // A preview's overlay is a REBUILT one and owns its own stylesheet; the boot
+      // pass's sheet is left alone, since it is what carries the rules the shell may
+      // still be dissolving against.
+      if (previewName !== null && parts.css.parentNode) parts.css.parentNode.removeChild(parts.css)
       // Handed back here rather than when the fade starts: a transparent caption
       // stays correct for the whole dissolve — it shows whatever is behind it, which
       // is exactly what is fading — whereas an opaque one would flip to the shell's
       // colours while the sea is still on screen.
       restoreCaptionTokens()
+      // Release the preview last, so the card's button cannot offer a second one
+      // while this overlay is still dissolving.
+      if (previewName !== null) {
+        previewName = null
+        var announce = previewDone
+        previewDone = null
+        if (typeof announce === 'function') {
+          try {
+            announce()
+          } catch (error) {
+            /* the card that asked for this may already be unmounted */
+          }
+        }
+      }
     }, span + 100)
 
     if (standalone) {
@@ -605,10 +729,23 @@
     return !!(node && node.closest && node.closest('.dshba-sound'))
   }
 
-  parts.root.addEventListener('pointerdown', function (event) {
-    if (onSoundControl(event)) return
-    press()
-  }, true)
+  /**
+   * Wire one overlay root to the enter gesture.
+   *
+   * A function rather than a bare statement because a PREVIEW rebuilds the overlay
+   * — the hint line and the sound button are decided at build time from the
+   * settings, so a preview of a differently-configured screen needs a fresh DOM —
+   * and a rebuilt root would otherwise have no pointer handler at all.
+   * @param root - the overlay root to listen on.
+   */
+  function wireRoot(root) {
+    root.addEventListener('pointerdown', function (event) {
+      if (onSoundControl(event)) return
+      press()
+    }, true)
+  }
+
+  wireRoot(parts.root)
   globalThis.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' || event.key === ' ' || event.key === 'Enter') {
       entered = true
@@ -677,11 +814,21 @@
   }
 
   function mount() {
-    document.head.appendChild(parts.css)
+    // A preview rebuilds `parts`, so its stylesheet is a new element; the boot
+    // pass's own sheet holds identical rules and stays where it is — the preview's
+    // is removed again on its way out.
+    if (!parts.css.parentNode) document.head.appendChild(parts.css)
     ;(document.body || document.documentElement).appendChild(parts.root)
     applyCaptionTokens()
-    observeProgress()
-    observeFailure()
+    if (previewName === null) {
+      observeProgress()
+      observeFailure()
+    } else {
+      // An already-booted shell has no kernel boot page, so there is no progress
+      // arc to read: a bar stuck at zero would be the one visible lie on an
+      // otherwise faithful preview.
+      parts.fill.style.width = '100%'
+    }
     startDiagnostics()
 
     // Everything below releases the hand-off, so every way this can stop must
@@ -736,8 +883,25 @@
         // outside this plugin's control (an unsupported codec, a truncated
         // download), and one failure must not leave the screen on a bare gradient
         // while the pool still holds playable clips.
-        var preferred = pickClip(clips)
-        var order = [preferred].concat(shuffled(clips).filter(function (clip) {
+        var preferred
+        if (previewName !== null) {
+          // The named clip, looked up in the PUBLISHED list rather than the enabled
+          // one: previewing a clip that is switched out of the rotation is exactly
+          // what that row's button is for.
+          for (var wanted = 0; wanted < published.length; wanted += 1) {
+            if (published[wanted].name === previewName) { preferred = published[wanted]; break }
+          }
+          if (!preferred) {
+            releaseWithoutClip('素材池里找不到这一段 · 点一下进入')
+            return
+          }
+        } else {
+          preferred = pickClip(clips)
+        }
+        // A preview plays that one clip or reports that it could not: falling back
+        // to another clip would answer "what does this one look like" with a
+        // different clip, which is worse than saying it did not play.
+        var order = previewName !== null ? [preferred] : [preferred].concat(shuffled(clips).filter(function (clip) {
           return clip.name !== preferred.name
         }))
 

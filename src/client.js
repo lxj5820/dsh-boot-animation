@@ -55,6 +55,15 @@ const DICTIONARY_EN = { title: 'Boot animation' }
 /** Where the clip pool is published, relative to the page. */
 const MANIFEST = '/plugins/dsh-boot-animation/clips.json'
 
+/**
+ * Where one clip's index table is moved to the front of its file.
+ *
+ * The file name travels in the query string rather than a body: the Host's own
+ * handler is handed the raw request, and a query parameter needs no body parsing
+ * to be certain of.
+ */
+const OPTIMIZE = '/plugins/dsh-boot-animation/optimize'
+
 /** Offered dissolve lengths, in milliseconds. */
 const FADE_CHOICES = [1000, 1500, 2000, 3000, 4000]
 
@@ -143,6 +152,9 @@ const CSS = [
   'background:rgba(127,127,127,.18);color:var(--dsw-alias-label-secondary,rgba(127,127,127,.95))}',
   '.dshba-badge.warn{background:rgba(210,120,40,.18);color:#b46214}',
   '.dshba-badge.bad{background:rgba(210,74,67,.18);color:#d24a43}',
+  '.dshba-badge.ok{background:rgba(7,150,90,.18);color:#07974b}',
+  '.dshba-clipline{display:flex;align-items:center;gap:9px;flex:1;min-width:0;cursor:pointer}',
+  '.dshba-mini{flex:none;padding:3px 10px;font-size:11.5px}',
   '.dshba-meta{font-size:11.5px;color:var(--dsw-alias-label-tertiary,rgba(127,127,127,.8));white-space:nowrap}',
   '.dshba-msg{margin-top:8px;font-size:11.5px;line-height:1.5;',
   'color:var(--dsw-alias-label-tertiary,rgba(127,127,127,.8))}',
@@ -177,7 +189,7 @@ function formatDuration(seconds) {
  * the row's one-liner and `view: "page"` for the configuration section.
  *
  * They are two COMPONENTS rather than two branches of one, because the summary
- * answer uses no hooks at all and the page answer uses seven. One component that
+ * answer uses no hooks at all and the page answer uses nine. One component that
  * returned early for the summary view would call a different number of hooks
  * depending on its props — a conditional hook call. React throws on that the
  * moment one instance is rendered with the other view, and what a user sees then
@@ -205,7 +217,7 @@ function BootAnimationSummary() {
  *
  * A component of its own, with no hooks, so that neither branch can change the
  * hook count of the other. Registering `BootAnimationCard` directly would make
- * that component call seven hooks for the page view and one for the summary view
+ * that component call eight hooks for the page view and one for the summary view
  * — a conditional hook call, which React rejects the moment one instance is
  * rendered with the other view. What a user sees when that happens is a card
  * that is present but dead: the page's own error boundary unmounts the subtree
@@ -304,6 +316,14 @@ function BootAnimationCard(props) {
   const [lengths, setLengths] = React.useState({})
   const [failure, setFailure] = React.useState(null)
   const [busy, setBusy] = React.useState(false)
+  // Per-clip rewrite state, keyed by file name: absent means untouched, 'busy'
+  // while the Host is working, 'done' once the file in the pool is the rewritten
+  // one, 'error' when it refused and the row should stay pressable.
+  const [fixing, setFixing] = React.useState({})
+  // The clip whose full-screen preview is on screen right now, or null. A preview
+  // covers the whole page, so this is what tells the card to stop offering another
+  // one — and what the overlay's own `onDone` clears.
+  const [previewing, setPreviewing] = React.useState(null)
 
   ensureStyle()
 
@@ -487,6 +507,94 @@ function BootAnimationCard(props) {
   }
 
   /**
+   * Ask the Host to move one clip's index table to the front of its file.
+   *
+   * Nothing is refetched afterwards. The manifest's per-clip `faststart` flag is
+   * patched in place instead, because re-reading the pool would re-run every media
+   * probe in the effect above — each one plays its clip for up to eight seconds —
+   * to learn a fact this call already knows. The clip's `src` keeps its old `?v=`
+   * revision, which is right: the bytes the probe judged are the bytes the card
+   * still holds, and the boot screen reads the manifest afresh on the next page
+   * load, where the revision will be the new one.
+   *
+   * A refusal is reported with the Host's own sentence rather than a generic
+   * failure: those sentences say which of the three reasons it was (too big, not
+   * an mp4, self-check failed and the original was restored), and that is the part
+   * the user can act on.
+   * @param name - the clip's file name, exactly as the manifest published it.
+   */
+  const optimize = (name) => {
+    setFailure(null)
+    setFixing((current) => Object.assign({}, current, { [name]: 'busy' }))
+    fetch(OPTIMIZE + '?name=' + encodeURIComponent(name), { method: 'POST', cache: 'no-store' })
+      .then((response) => response.json()
+        .catch(() => ({ ok: false, error: 'Host 回答了 HTTP ' + String(response.status) })))
+      .then((answer) => {
+        if (answer !== null && typeof answer === 'object' && answer.ok === true) {
+          setFixing((current) => Object.assign({}, current, { [name]: 'done' }))
+          setPool((current) => (current === null ? current : current.map((clip) => (
+            clip.name === name ? Object.assign({}, clip, { faststart: true }) : clip
+          ))))
+          return
+        }
+        setFixing((current) => Object.assign({}, current, { [name]: 'error' }))
+        const why = answer !== null && typeof answer === 'object' && answer.error !== undefined
+          ? String(answer.error)
+          : 'Host 没有说明原因'
+        setFailure('优化 ' + name + ' 失败：' + why)
+      })
+      .catch((error) => {
+        setFixing((current) => Object.assign({}, current, { [name]: 'error' }))
+        setFailure('优化 ' + name + ' 失败：' + String(error))
+      })
+  }
+
+  /**
+   * Play this clip as the real boot animation, full screen, right now.
+   *
+   * The overlay is the one the page already carries (`__DSH_BOOT_ANIM__`, installed
+   * by the injected head script): it is asked to run a second time, for this clip,
+   * with the settings the card is showing at this moment — so the fade, the enter
+   * mode, the hint line and the sound behaviour are the live ones rather than the
+   * ones this page happened to be served with. It leaves by the same dissolve a real
+   * start uses, then calls back, which is when the button becomes pressable again.
+   *
+   * The one failure worth naming: a page loaded BEFORE this feature existed has the
+   * old overlay in memory, whose namespace has no `preview`. Saying so beats a
+   * button that appears to do nothing.
+   * @param name - the clip's file name, exactly as the manifest published it.
+   */
+  const preview = (name) => {
+    const overlay = globalThis[OVERLAY]
+    if (overlay === null || overlay === undefined || typeof overlay.preview !== 'function') {
+      setFailure('这一页的入场层还没有预览接口（页面是在这次改动之前加载的）：刷新页面后再点。')
+      return
+    }
+    setFailure(null)
+    setPreviewing(name)
+    let started = false
+    try {
+      started = overlay.preview({
+        name,
+        fadeMs,
+        enterMode,
+        sound,
+        clickToEnter,
+        showHint,
+        onDone: () => setPreviewing(null),
+      }) === true
+    } catch (error) {
+      setPreviewing(null)
+      setFailure('预览没能启动：' + String(error))
+      return
+    }
+    if (!started) {
+      setPreviewing(null)
+      setFailure('已经有一个预览在跑了，等它结束再点。')
+    }
+  }
+
+  /**
    * One behaviour switch: label, checkbox, and the sentence for the state it is
    * currently in. A plain factory rather than a component — it calls no hooks,
    * which is what lets the card's hook count stay the same for every render.
@@ -588,6 +696,7 @@ function BootAnimationCard(props) {
     } else {
       for (const clip of pool) {
         const known = lengths[clip.name] || {}
+        const state = fixing[clip.name]
         // The duration is the row's primary fact, so it is shown whenever the
         // probe has it; a problem is an ADDITIONAL badge rather than a replacement
         // for it. Reporting "unplayable" in place of the length meant a probe bug
@@ -615,23 +724,55 @@ function BootAnimationCard(props) {
             className: 'dshba-badge warn',
             key: 'moov',
             title: '索引表(moov)在文件末尾：浏览器要整段下载完才出画面。'
-              + '用 node tools/faststart.mjs --write 可以无损重排。',
+              + '点这一行右边的「优化」可以无损前移。',
           }, '未优化'))
         }
-        clipNodes.push(React.createElement('label', { className: 'dshba-clip', key: clip.name, title: clip.name },
-          React.createElement('input', {
-            type: 'checkbox',
-            // Read from the SETTINGS, not from the manifest field. The manifest is
-            // fetched once when the card opens, so binding the box to its `enabled`
-            // value meant a write never changed what the box displayed: the change
-            // persisted and only appeared after the dialog was reopened, which is
-            // exactly how that was reported.
-            checked: !disabled.includes(clip.name),
-            disabled: busy,
-            onChange: (event) => toggleClip(clip.name, event.target.checked),
-          }),
-          React.createElement('span', { className: 'dshba-nm' }, clip.name),
-          badges,
+        if (state === 'done') {
+          badges.push(React.createElement('span', { className: 'dshba-badge ok', key: 'fixed' }, '已重排'))
+        }
+        // The button is a SIBLING of the label, never a child of it: a button
+        // nested in a label is an interactive element inside a control, and a click
+        // on it then becomes a question about label activation rather than about
+        // the button.
+        clipNodes.push(React.createElement('div', { className: 'dshba-clip', key: clip.name },
+          React.createElement('label', { className: 'dshba-clipline', title: clip.name },
+            React.createElement('input', {
+              type: 'checkbox',
+              // Read from the SETTINGS, not from the manifest field. The manifest is
+              // fetched once when the card opens, so binding the box to its `enabled`
+              // value meant a write never changed what the box displayed: the change
+              // persisted and only appeared after the dialog was reopened, which is
+              // exactly how that was reported.
+              checked: !disabled.includes(clip.name),
+              disabled: busy,
+              onChange: (event) => toggleClip(clip.name, event.target.checked),
+            }),
+            React.createElement('span', { className: 'dshba-nm' }, clip.name),
+            badges),
+          // 预览 on EVERY row: whether a clip's index sits at the front has nothing
+          // to do with how it looks as the boot animation, and the preview is the
+          // only way to judge that without restarting DSH.
+          React.createElement('button', {
+            type: 'button',
+            className: 'dshba-opt dshba-mini',
+            disabled: previewing !== null,
+            title: '现在就把这一段当作启动动画满屏跑一遍：按当前设置演一遍真实的入场过渡。',
+            onClick: () => preview(clip.name),
+          }, previewing === clip.name ? '预览中…' : '预览'),
+          // Only a clip the Host reported as unoptimised offers the rewrite, and it
+          // stays offered after a refusal so the user can retry once they have dealt
+          // with the reason. `busy` is the settings-write flag: a rewrite running
+          // while the settings document is being written is not worth allowing.
+          clip.faststart === false
+            ? React.createElement('button', {
+              type: 'button',
+              className: 'dshba-opt dshba-mini',
+              disabled: busy || state === 'busy' || previewing !== null,
+              title: '把这一段的索引表(moov)移到文件最前：无损、长度不变，'
+                + '原片留在 assets/videos/originals/ 里。',
+              onClick: () => optimize(clip.name),
+            }, state === 'busy' ? '处理中…' : '优化')
+            : null,
           React.createElement('span', { className: 'dshba-meta' }, formatBytes(clip.bytes))))
       }
     }
