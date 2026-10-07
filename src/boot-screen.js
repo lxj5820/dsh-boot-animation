@@ -37,6 +37,20 @@
   // fire are all skipped, so nothing can bring the sound back for this screen.
   // A missing key means on, which is the behaviour every older Host row had.
   var SOUND_ON = cfg.sound !== false
+  // The sound button is a glyph and nothing else: '🔇' while nothing is coming out
+  // of the speakers and pressing it is what starts the sound, '🔊' while the track
+  // is playing. The words live in `title`/`aria-label`, where they cost no layout
+  // and cannot go stale on screen.
+  //
+  // They are written from one place because they describe the CLIP rather than the
+  // last click: a label written by each click handler instead of by the state is
+  // how this button came to show a muted glyph next to audible sound.
+  var SOUND_TEXT_OFF = '🔇'
+  var SOUND_TEXT_ON = '🔊'
+  var SOUND_NAME = '影片声音'
+  var SOUND_HINT_OFF = '点一下打开声音'
+  var SOUND_HINT_ON = '点一下关闭声音'
+  var SOUND_HINT_REFUSED = '浏览器拒绝了声音，点一下重试'
   // A press enters instead of unlocking audio. See press().
   var CLICK_TO_ENTER = cfg.clickToEnter === true
   // The bottom hint line. Off hides that one element; the title and the progress
@@ -164,7 +178,10 @@
       '.dshba[data-attention="1"] .dshba-hint{opacity:1;color:#ffd79a;letter-spacing:.04em}',
       '.dshba[data-attention="1"] .dshba-fill{background:linear-gradient(90deg,#d99a4f,#ffd79a)}',
       '.dshba-sound{position:absolute;right:22px;bottom:22px;z-index:2;cursor:pointer;',
-      'font:12px/1 system-ui,sans-serif;letter-spacing:.06em;padding:9px 14px;border-radius:999px;',
+      // A glyph, so the control is a fixed circle instead of a pill sized by its
+      // own wording: the emoji is the whole face of the button.
+      'width:38px;height:38px;display:flex;align-items:center;justify-content:center;',
+      'font-size:16px;line-height:1;padding:0;border-radius:999px;',
       'color:#cfe4f6;background:rgba(12,26,42,.62);border:1px solid rgba(159,196,230,.38);',
       'backdrop-filter:blur(4px);transition:opacity .4s ease,background .2s ease}',
       '.dshba-sound:hover{background:rgba(20,44,70,.78)}',
@@ -221,7 +238,13 @@
       sound = document.createElement('button')
       sound.className = 'dshba-sound'
       sound.type = 'button'
-      sound.textContent = '🔇 开声音'
+      // No clip has been started yet, so the button's first state is the silent
+      // one. Every later write goes through renderSound, which derives the glyph
+      // from the audio state rather than from the click that caused it; the name
+      // and the tooltip carry the words, and neither changes with the state.
+      sound.textContent = SOUND_TEXT_OFF
+      sound.title = SOUND_HINT_OFF
+      sound.setAttribute('aria-label', SOUND_NAME)
       sound.addEventListener('pointerdown', function (event) { event.stopPropagation() }, true)
       sound.addEventListener('click', function (event) {
         event.preventDefault()
@@ -279,6 +302,49 @@
     },
   }
   globalThis.__DSH_BOOT_ANIM__ = namespace
+
+  // The sound button is drawn from the audio state, never from the click that
+  // changed it: every path that makes the clip audible or silent goes through
+  // setAudioBlocked, so there is one writer and no path can leave the label
+  // behind. That is the whole fix for a button that showed the muted glyph while
+  // the clip was playing.
+  /**
+   * Repaint the sound button from the state of the clip.
+   *
+   * `namespace.audioBlocked` is the recorded reason the clip is silent (`null`
+   * when it is allowed to be heard) and the element's own `muted` flag is the half
+   * a listener can check with their ears. Deriving the glyph from both is what
+   * keeps a muted icon off a playing clip: the unmuted start attempt and the retry
+   * a press fires make the clip audible without a click handler of their own, and
+   * both used to leave the initial label on screen while the sound was already
+   * running — most visibly in the desktop app, where autoplay with sound needs no
+   * user gesture at all.
+   *
+   * @param hint - tooltip to show instead of the default action, for a state with
+   *   something more specific to say than "press to start it".
+   */
+  function renderSound(hint) {
+    if (!parts.sound) return
+    var audible = !parts.video().muted && namespace.audioBlocked === null
+    parts.sound.textContent = audible ? SOUND_TEXT_ON : SOUND_TEXT_OFF
+    // The glyph carries the state at a glance and the words stay available on
+    // hover, so nothing is lost by keeping them off the button face.
+    parts.sound.title = hint || (audible ? SOUND_HINT_ON : SOUND_HINT_OFF)
+    // The control is a toggle, so its pressed state is the same fact the glyph
+    // shows: a screen reader must not be told the clip is silent while it plays.
+    parts.sound.setAttribute('aria-pressed', audible ? 'true' : 'false')
+  }
+
+  /**
+   * Record why the clip is silent — or that it is not — and repaint the button.
+   * @param reason - `null` when the clip may be heard, otherwise the reason the
+   *   diagnostics line reports.
+   * @param hint - optional tooltip for renderSound.
+   */
+  function setAudioBlocked(reason, hint) {
+    namespace.audioBlocked = reason
+    renderSound(hint)
+  }
 
   // The hints, one per state the screen can actually be in: while the clip is
   // silent the first press means "let me hear it", once sound is on a press means
@@ -396,19 +462,18 @@
     var video = parts.video()
     if (!video.muted) {
       video.muted = true
-      if (parts.sound) parts.sound.textContent = '🔇 开声音'
-      namespace.audioBlocked = 'muted-by-user'
+      setAudioBlocked('muted-by-user')
       return
     }
     video.muted = false
-    namespace.audioBlocked = null
-    if (parts.sound) parts.sound.textContent = '🔊 声音已开'
+    setAudioBlocked(null)
     var played = video.play()
     if (played && typeof played.catch === 'function') {
       played.catch(function (reason) {
         video.muted = true
-        namespace.audioBlocked = reason && reason.name ? reason.name : 'refused'
-        if (parts.sound) parts.sound.textContent = '🔇 被拒绝'
+        // The element is muted again, so the tooltip is what says this press was
+        // refused rather than merely silent.
+        setAudioBlocked(reason && reason.name ? reason.name : 'refused', SOUND_HINT_REFUSED)
         var retryMuted = video.play()
         if (retryMuted && typeof retryMuted.catch === 'function') retryMuted.catch(function () {})
       })
@@ -582,8 +647,13 @@
     // condition below is already false (no audioRetry was ever armed), and this
     // flag is what makes the same shortcut explicit.
     if (!CLICK_TO_ENTER && !finished && namespace.audioBlocked !== null && typeof audioRetry === 'function') {
+      // This press is the user activation the retry wants, so the clip is on its
+      // way to being audible and both the reason and the button say so here. The
+      // order matters: the optimistic write comes first and the retry's own
+      // refusal puts the reason back, so a policy that still says no cannot end up
+      // with a button claiming sound that never started.
+      setAudioBlocked(null)
       audioRetry()
-      namespace.audioBlocked = null
       if (!namespace.failed) parts.hint.textContent = HINT_SOUND
       return
     }
@@ -744,8 +814,10 @@
         var settled = false
         var attempt = 0
         // The retry lives in the outer scope so the entering gesture can reach it;
-        // this flag records why the clip is silent, for the hint to report.
-        namespace.audioBlocked = SOUND_ON ? null : 'disabled'
+        // this flag records why the clip is silent, for the hint to report — and
+        // it is also what the sound button is drawn from, so it is written through
+        // the setter rather than assigned.
+        setAudioBlocked(SOUND_ON ? null : 'disabled')
 
         /**
          * Start a clip. Sound first, muted only as the fallback.
@@ -774,16 +846,31 @@
               onRefused()
               return
             }
+            // The attempt resolving is the moment the button can be told the
+            // truth: an unmuted start is what makes the clip audible, while a muted
+            // fallback stays silent however it ended, so the reason — and the label
+            // drawn from it — are left exactly as they were.
+            var started = function () {
+              if (muted) renderSound()
+              else setAudioBlocked(null)
+              playing()
+            }
             if (played && typeof played.then === 'function') {
-              played.then(playing, onRefused)
+              played.then(started, onRefused)
               return
             }
-            playing()
+            started()
           }
           var fallback = function () {
-            namespace.audioBlocked = 'refused'
+            setAudioBlocked('refused')
             audioRetry = function () {
-              attemptPlay(false, function () {/* stays silent */})
+              attemptPlay(false, function () {
+                // Refused again, this time with a gesture behind it: the clip is
+                // silent, so the element goes back to muted and the button goes
+                // back to saying so instead of promising sound that is not there.
+                video.muted = true
+                setAudioBlocked('refused', SOUND_HINT_REFUSED)
+              })
             }
             attemptPlay(true, blocked)
           }
@@ -792,7 +879,7 @@
           // one start the audio policy always permits, so this path cannot land in
           // `blocked` for a policy reason.
           if (!SOUND_ON) {
-            namespace.audioBlocked = 'disabled'
+            setAudioBlocked('disabled')
             audioRetry = null
             attemptPlay(true, blocked)
             return
@@ -803,7 +890,10 @@
           // starts because muted autoplay is what the policy permits.
           var soundWindow = globalThis.setTimeout(fallback, 1200)
           var settleWindow = function () { globalThis.clearTimeout(soundWindow) }
-          var unmutedPlaying = function () { settleWindow(); playing() }
+          // This attempt resolved unmuted: the clip is audible, and this is the one
+          // fact the button is drawn from, so it is written before the reveal
+          // callback gets to say anything about the clip.
+          var unmutedPlaying = function () { settleWindow(); setAudioBlocked(null); playing() }
           var unmutedRefused = function () { settleWindow(); fallback() }
           video.muted = false
           var played

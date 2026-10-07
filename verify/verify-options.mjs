@@ -1,5 +1,6 @@
 // Behavioural verification of the three interaction switches — `sound`,
-// `clickToEnter`, `showHint` — plus the client bundle's freshness.
+// `clickToEnter`, `showHint` — plus the sound button's label state and the client
+// bundle's freshness.
 //
 // The other two suites stop at the Host half: they prove the schema and the
 // injected row carry the values. That is necessary and not sufficient, because
@@ -26,6 +27,10 @@ const root = join(here, '..')
 const SCREEN = readFileSync(join(root, 'src', 'boot-screen.js'), 'utf8')
 const CLIENT = readFileSync(join(root, 'src', 'client.js'), 'utf8')
 const BUNDLE = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
+// The screen's own comments quote the bugs they explain — including a broken CSS
+// selector and the old per-click label writes — so the static checks run against
+// the code with comments stripped, which is what the browser sees.
+const screenCode = SCREEN.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 
 let failures = 0
 let checks = 0
@@ -89,8 +94,11 @@ class Element {
     this.error = null
     /** Every play() this element was asked for, by the `muted` it was asked with. */
     this.playCalls = []
-    /** 'allow' starts muted or unmuted; 'refuse-unmuted' is the autoplay policy. */
-    this.playPolicy = 'allow'
+    /**
+     * The document's autoplay state, shared by every element it creates: the
+     * browser's rule plus whether the page has seen a user gesture yet. See play().
+     */
+    this.activation = { policy: 'allow', gesture: false }
   }
 
   setAttribute(name, value) { this.attrs[name] = String(value) }
@@ -112,6 +120,10 @@ class Element {
   addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler) }
   removeEventListener() {}
   dispatch(type, event) {
+    // A pointer press is the user gesture Chromium records before it runs any
+    // handler, which is exactly why the screen's retry can succeed where the
+    // unattended unmuted attempt could not.
+    if (type === 'pointerdown') this.activation.gesture = true
     for (const handler of this.listeners[type] ?? []) handler(event ?? {})
   }
   matches(selector) { return matches(this, selector) }
@@ -127,7 +139,15 @@ class Element {
   getBoundingClientRect() { return { left: 0, top: 0, width: 1280, height: 720 } }
   play() {
     this.playCalls.push(this.muted)
-    if (this.muted === false && this.playPolicy === 'refuse-unmuted') {
+    // 'refuse-unmuted' is Chromium on an origin it has not seen a gesture from:
+    // the unattended unmuted attempt is refused, and the press that follows is the
+    // activation that lets the very same call through. 'refuse-always' is the
+    // stubborn policy that keeps saying no — the only way to reach the refusal
+    // note on the button.
+    const { policy, gesture } = this.activation
+    const refused = this.muted === false
+      && (policy === 'refuse-always' || (policy === 'refuse-unmuted' && !gesture))
+    if (refused) {
       return Promise.reject(Object.assign(new Error('play() failed'), { name: 'NotAllowedError' }))
     }
     this.paused = false
@@ -138,15 +158,19 @@ class Element {
 }
 
 function makeDocument(playPolicy) {
+  // One activation record per document: the gesture the page has seen belongs to
+  // the page, not to the element that happened to be pressed.
+  const activation = { policy: playPolicy ?? 'allow', gesture: false }
+  const make = (tag) => {
+    const element = new Element(tag)
+    element.activation = activation
+    return element
+  }
   const doc = {
-    head: new Element('head'),
-    body: new Element('body'),
-    documentElement: new Element('html'),
-    createElement: (tag) => {
-      const element = new Element(tag)
-      if (tag === 'video' && playPolicy !== undefined) element.playPolicy = playPolicy
-      return element
-    },
+    head: make('head'),
+    body: make('body'),
+    documentElement: make('html'),
+    createElement: (tag) => make(tag),
     querySelector: (selector) => find(doc.body, selector),
     getElementById: () => null,
     addEventListener: () => {},
@@ -256,7 +280,71 @@ equal('one press enters', state(direct), 'leaving')
 equal('...without spending a play() on the audio retry', video(direct).playCalls, [false, true])
 
 // ---------------------------------------------------------------------------
-console.log('\n[4] showHint off: only the sentence goes')
+console.log('\n[4] the sound button describes the clip, not the last click')
+// ---------------------------------------------------------------------------
+// The reported bug: nothing refuses the unmuted start on a desktop build, so the
+// clip plays with sound while the button still shows the muted glyph it was born
+// with. The glyph has to come out of the audio state at every transition, because
+// the two attempts that make a clip audible are not clicks on this button.
+const audible = mount({ sound: true }, { playPolicy: 'allow' })
+await settle()
+const audibleButton = find(audible.doc.body, '.dshba-sound')
+const clickButton = (button) => button.dispatch('click', { preventDefault: () => {}, stopPropagation: () => {} })
+const WORDS = /[\u4e00-\u9fa5]/
+equal('a clip the policy allows starts with sound', video(audible).playCalls, [false])
+equal('...and the button shows the unmuted glyph, not the muted one it was born with',
+  audibleButton.textContent, '🔊')
+check('...with no wording on its face at all', WORDS.test(audibleButton.textContent) === false,
+  'text=' + audibleButton.textContent)
+equal('...and the words moved to the tooltip', audibleButton.title, '点一下关闭声音')
+equal('...behind a stable accessible name', audibleButton.getAttribute('aria-label'), '影片声音')
+equal('...and reports itself pressed', audibleButton.getAttribute('aria-pressed'), 'true')
+clickButton(audibleButton)
+equal('clicking the button mutes the clip', video(audible).muted, true)
+equal('...and the glyph goes back to the muted one', audibleButton.textContent, '🔇')
+equal('...with the tooltip now offering the sound', audibleButton.title, '点一下打开声音')
+equal('...and stops reporting itself pressed', audibleButton.getAttribute('aria-pressed'), 'false')
+clickButton(audibleButton)
+equal('clicking it again unmutes the clip', video(audible).muted, false)
+equal('...and the glyph follows', audibleButton.textContent, '🔊')
+
+// The two-step case: a refused unmuted start leaves the clip silent and the button
+// offering the sound, and the press that unlocks it is not a click on the button —
+// so the glyph has to be written by the retry as well.
+const unlock = mount({ sound: true }, { playPolicy: 'refuse-unmuted' })
+await settle()
+const unlockButton = find(unlock.doc.body, '.dshba-sound')
+equal('a refused unmuted start falls back to a muted clip', video(unlock).playCalls, [false, true])
+equal('...and the button offers the sound', unlockButton.textContent, '🔇')
+press(unlock)
+await settle()
+equal('the press reaches the unmuted retry', video(unlock).playCalls, [false, true, false])
+equal('...and the button follows the clip, not the click', unlockButton.textContent, '🔊')
+equal('...with the reason cleared', overlay(unlock).audioBlocked, null)
+
+// A policy that refuses even behind the gesture: the button must go back to saying
+// the clip is silent rather than keep the optimistic glyph the press wrote.
+const stubborn = mount({ sound: true }, { playPolicy: 'refuse-always' })
+await settle()
+const stubbornButton = find(stubborn.doc.body, '.dshba-sound')
+press(stubborn)
+await settle()
+equal('a retry that is refused anyway leaves the clip silent',
+  video(stubborn).playCalls, [false, true, false])
+equal('...the element goes back to muted', video(stubborn).muted, true)
+equal('...and the button shows the silent glyph again', stubbornButton.textContent, '🔇')
+equal('...with the refusal spelled out in the tooltip instead',
+  stubbornButton.title, '浏览器拒绝了声音，点一下重试')
+equal('...with the reason recorded for the diagnostics line',
+  overlay(stubborn).audioBlocked, 'refused')
+
+// The glyph has exactly two writers — the initial state and renderSound — which is
+// what keeps a click handler from inventing a state of its own.
+const labelWrites = screenCode.match(/(?:parts\.)?sound\.textContent\s*=/g) ?? []
+equal('the sound glyph is written from one place', labelWrites.length, 2)
+
+// ---------------------------------------------------------------------------
+console.log('\n[5] showHint off: only the sentence goes')
 // ---------------------------------------------------------------------------
 const noHint = mount({ showHint: false })
 await settle()
@@ -273,15 +361,12 @@ check('the stylesheet carries the rule that hides it',
 // Chrome drops the entire rule without a word, which is why this is asserted
 // rather than trusted to review.
 const unquotedNumeric = /\[[A-Za-z-]+=\d[^\]]*\]/
-// Comments stripped first: the prose explaining this bug quotes the broken
-// selector, which a raw regex over the file reads as the bug itself.
-const screenCode = SCREEN.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 check('no attribute selector leaves a numeric value unquoted',
   unquotedNumeric.test(screenCode) === false,
   (screenCode.match(unquotedNumeric) ?? ['none'])[0])
 
 // ---------------------------------------------------------------------------
-console.log('\n[5] the card edits exactly these three fields')
+console.log('\n[6] the card edits exactly these three fields')
 // ---------------------------------------------------------------------------
 const cardCode = CLIENT.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 for (const field of ['sound', 'clickToEnter', 'showHint']) {
@@ -294,7 +379,7 @@ check('the card defaults match the Host defaults (absent means on/default)',
   && cardCode.includes("stored.showHint !== false"))
 
 // ---------------------------------------------------------------------------
-console.log('\n[6] the settings card renders the three switches and writes them')
+console.log('\n[7] the settings card renders the three switches and writes them')
 // ---------------------------------------------------------------------------
 // The card is React, and this package ships no React. But the card must be
 // reachable exactly the way the shell reaches it: evaluate `lib/client.js` in a
