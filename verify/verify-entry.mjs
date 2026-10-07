@@ -425,7 +425,13 @@ console.log('\n[7] package.json')
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 equal('peerDependencies', pkg.peerDependencies, { '@deepseek-ai/schemastery': '*' })
 check('no runtime dependencies', pkg.dependencies === undefined, JSON.stringify(pkg.dependencies))
-equal('name / version', [pkg.name, pkg.version], ['dsh-boot-animation', '0.1.0'])
+equal('name', pkg.name, 'dsh-boot-animation')
+// Deliberately not a pinned literal. This assertion read `0.1.0` until the
+// release commit that bumped the package to 0.2.0, at which point the suite went
+// red for a reason that had nothing to do with the code - a defect in the suite.
+// What is worth checking is that the field is present and well-formed.
+check('version is a semver',
+  /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(String(pkg.version)), String(pkg.version))
 check('description untouched', typeof pkg.description === 'string' && pkg.description.length > 0)
 equal('exports untouched', Object.keys(pkg.exports), ['.', './client', './cordis.patch.yml', './package.json'])
 equal('files untouched', pkg.files, ['assets', 'lib', 'src', 'cordis.patch.yml', 'entry.js', 'package.json'])

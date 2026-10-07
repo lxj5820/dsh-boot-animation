@@ -50,6 +50,36 @@ $PluginName = 'dsh-boot-animation'
 function Say($m) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $m" }
 function Fail($m) { Say "FAILED: $m"; exit 2 }
 
+# The patch layer is BOM-less UTF-8 and routinely carries CJK (a provider's
+# displayName, a comment). Both the read and the write below therefore go through
+# .NET's UTF-8 codec: `Get-Content` without -Encoding decodes it as the system
+# ANSI codepage on PowerShell 5.1, and `Set-Content -Encoding utf8` there means
+# UTF-8 WITH a BOM. Either one is a change to a file this script does not own.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+# How many insert blocks in the patch layer declare this plugin with the three
+# lines this script writes and uninstall.ps1 removes.
+#
+# Counting them is not the same as searching the file for the plugin name. Once
+# the settings card has saved a value, the settings service writes a row of its
+# own into this file - `- id: boot-animation` with a `config:` block and no
+# `insert:`. That row mounts nothing, but a name search sees it, concludes
+# "already installed", and leaves the plugin off the loader graph while reporting
+# success. tools/install.sh counts insert rows for exactly this reason.
+function Get-InsertRowCount([string]$path) {
+  $raw = [System.IO.File]::ReadAllText($path, $Utf8NoBom)
+  $eol = '(?:\r\n|\n|\r)'
+  $idLine = '[ \t]*-[ \t]*id:[ \t]*boot-animation[ \t]*'
+  $nameLine = '[ \t]*name:[ \t]*' + [regex]::Escape($PluginName) + '[ \t]*'
+  # One line, deliberately. PowerShell does NOT continue after a trailing `+`
+  # when the statement is already complete: `$a = 'x' + $b` ends there, and a
+  # following line starting with `+` becomes a unary plus that throws at runtime -
+  # swallowed by $ErrorActionPreference = 'Continue', leaving a pattern that is
+  # silently half-built and matches the wrong row.
+  $pattern = '(?m)^[ \t]*-[ \t]*insert:[ \t]*' + $eol + $idLine + $eol + $nameLine
+  return ([regex]::Matches($raw, $pattern)).Count
+}
+
 # --- where are we -----------------------------------------------------------
 if (-not (Test-Path (Join-Path $PackageDir 'package.json'))) {
   Fail "the package was not found at '$PackageDir'. Pass -PackageDir <dir>."
@@ -194,13 +224,27 @@ if (Test-Path $SchemaLink) {
 }
 
 Say '=== 3/5 append the plugin row to the patch layer ==='
-$before = Get-Content $PatchFile -Raw
-if ($before -match [regex]::Escape($PluginName)) {
-  Say '  the patch layer already mentions this plugin; leaving it alone'
+$rows = Get-InsertRowCount $PatchFile
+if ($rows -gt 0) {
+  Say "  an insert row for this plugin is already there ($rows of them); leaving it alone"
 } else {
-  $row = "- insert:`r`n    - id: boot-animation`r`n      name: $PluginName`r`n"
-  Add-Content -Path $PatchFile -Value $row -Encoding utf8
+  # Written with .NET rather than Add-Content: `-Encoding utf8` means different
+  # things on PowerShell 5.1 and 7, and the appended block must neither add a BOM
+  # nor normalise the line endings of a file this script does not own. The block
+  # uses the terminator the file already uses, so the style stays uniform, and it
+  # ends on its own newline instead of leaving a blank line behind.
+  $raw = [System.IO.File]::ReadAllText($PatchFile, $Utf8NoBom)
+  $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $block = '- insert:' + $newline + '    - id: boot-animation' + $newline + '      name: ' + $PluginName + $newline
+  if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n") -and -not $raw.EndsWith("`r")) {
+    $raw += $newline
+  }
+  [System.IO.File]::WriteAllText($PatchFile, $raw + $block, $Utf8NoBom)
   Say '  appended 3 lines'
+  if ($raw -match [regex]::Escape($PluginName)) {
+    Say '  note: the layer already carried this plugin name without an insert row'
+    Say '        (a config override, e.g. settings the card saved); it is left as it is.'
+  }
 }
 
 Say '=== 4/5 tell dsh to pick it up ==='

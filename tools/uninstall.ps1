@@ -36,16 +36,9 @@ $PluginName = 'dsh-boot-animation'
 function Say($m) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $m" }
 function Fail($m) { Say "FAILED: $m"; exit 2 }
 
-# The patch layer is UTF-8 without a BOM, and must stay exactly that way.
+# The patch layer is UTF-8 without a BOM, and must stay exactly that way - in
+# bytes, not merely in the lines this script owns.
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-
-function Get-Lines([string]$path) {
-  return @([System.IO.File]::ReadAllLines($path, $Utf8NoBom))
-}
-
-function Set-Lines([string]$path, [string[]]$lines) {
-  [System.IO.File]::WriteAllLines($path, $lines, $Utf8NoBom)
-}
 
 if ($DshHome -eq '') {
   if ($env:DSH_HOME -ne '' -and $null -ne $env:DSH_HOME) { $DshHome = $env:DSH_HOME }
@@ -70,30 +63,57 @@ Copy-Item $PatchFile (Join-Path $Backup 'cordis.patch.yml') -Force
 Say "  backup = $Backup"
 
 Say '=== 2/3 remove the row this plugin appended ==='
-$lines = Get-Lines $PatchFile
-$kept = @()
-$removed = 0
-for ($i = 0; $i -lt $lines.Count; $i++) {
-  # The block install.ps1 writes is exactly:
-  #   - insert:
-  #       - id: boot-animation
-  #         name: dsh-boot-animation
-  # Match it by the row it names, and only when it is this plugin's row.
-  if ($lines[$i] -match '^\s*- insert:\s*$' -and
-      ($i + 2) -lt $lines.Count -and
-      $lines[$i + 1] -match '^\s*- id:\s*boot-animation\s*$' -and
-      $lines[$i + 2] -match ('^\s*name:\s*' + [regex]::Escape($PluginName) + '\s*$')) {
-    $i += 2
-    $removed += 1
-    continue
-  }
-  $kept += $lines[$i]
-}
-if ($removed -eq 0) {
+# The block install.ps1 writes is exactly:
+#   - insert:
+#       - id: boot-animation
+#         name: dsh-boot-animation
+# Match it by the row it names, and only when it is this plugin's row.
+#
+# The removal works on the file's BYTES. The previous implementation read and
+# wrote lines, and WriteAllLines terminates every line with
+# [Environment]::NewLine - CRLF on Windows - so a profile whose cordis.patch.yml
+# used LF came back entirely rewritten, far beyond the three lines this script
+# owns. Here every kept byte is copied unchanged, and WriteAllText neither adds a
+# BOM nor normalises a terminator.
+$raw = [System.IO.File]::ReadAllText($PatchFile, $Utf8NoBom)
+$eol = '(?:\r\n|\n|\r)'
+# One line, deliberately: PowerShell does not continue after a trailing `+` when
+# the statement is already complete, and the half-built pattern that results is
+# reported nowhere - $ErrorActionPreference = 'Continue' swallows the failure and
+# the regex silently matches the wrong block.
+$idLine = '[ \t]*-[ \t]*id:[ \t]*boot-animation[ \t]*'
+$nameLine = '[ \t]*name:[ \t]*' + [regex]::Escape($PluginName) + '[ \t]*'
+$block = '(?m)^[ \t]*-[ \t]*insert:[ \t]*' + $eol + $idLine + $eol + $nameLine + $eol + '?'
+# Not `$matches`: that is PowerShell's automatic variable for the last -match, and
+# assigning to it is both a lint error and a trap for the next reader.
+$found = [regex]::Matches($raw, $block)
+if ($found.Count -eq 0) {
   Say "  no row for $PluginName found; the patch layer is already clean"
 } else {
-  Set-Lines $PatchFile $kept
-  Say "  removed $removed row(s)"
+  # Keep the promise the docs make: the bytes that leave the file are exactly the
+  # bytes of the rows that were matched. If anything else went with them, nothing
+  # is written and the patch layer is left as it was.
+  #
+  # One case cannot be restored to the pre-install bytes, and it is said out loud
+  # rather than claimed away: a patch layer whose last line carried no final
+  # newline. install.ps1 has to start the appended block on a line of its own, so
+  # it adds that terminator, and nothing on disk records that the file used to
+  # lack it - the uninstaller cannot know to take it away again. The file ends on
+  # a newline, which both YAML and git want. uninstall.sh documents the same
+  # single-byte case.
+  $rewritten = [regex]::Replace($raw, $block, '')
+  $removedBytes = 0
+  foreach ($match in $found) { $removedBytes += $Utf8NoBom.GetByteCount($match.Value) }
+  $beforeBytes = $Utf8NoBom.GetByteCount($raw)
+  $afterBytes = $Utf8NoBom.GetByteCount($rewritten)
+  if ($afterBytes + $removedBytes -eq $beforeBytes) {
+    [System.IO.File]::WriteAllText($PatchFile, $rewritten, $Utf8NoBom)
+    Say "  removed $($found.Count) row(s) ($removedBytes bytes); every other byte is unchanged"
+  } else {
+    Say '  WARNING: the rewrite did not account for every byte'
+    Say "    file $beforeBytes bytes, kept $afterBytes bytes, removed rows $removedBytes bytes"
+    Say '  The patch layer is left exactly as it was; nothing was written.'
+  }
 }
 
 Say '=== 3/3 remove the directory link ==='
