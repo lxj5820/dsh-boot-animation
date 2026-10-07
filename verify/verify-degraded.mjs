@@ -80,7 +80,7 @@ const ctx = {
   webServer: { register: (route) => { routes.push(route); return () => {} } },
 }
 mod.apply(ctx, mod.Config({}))
-check('both routes are registered', routes.length === 2, routes.map((r) => r.path).join(', '))
+check('all three routes are registered', routes.length === 3, routes.map((r) => r.path).join(', '))
 const table = []
 check('the injection listener is subscribed', typeof listeners.get('webserver/index-inject') === 'function')
 listeners.get('webserver/index-inject')(table)

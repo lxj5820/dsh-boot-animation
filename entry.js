@@ -2,8 +2,9 @@
 //
 // Two contributions, both required for the overlay to exist at all:
 //
-//  1. a webserver route serving the clip pool (bytes from ./assets/videos) and
-//     a same-origin manifest naming them, and
+//  1. a webserver route serving the clip pool (bytes from ./assets/videos), a
+//     same-origin manifest naming them, and one on-demand route that moves a
+//     clip's index table to the front of its file (the card's 优化 button), and
 //  2. an index injection whose head row installs the screen before the shell
 //     boots.
 //
@@ -39,6 +40,7 @@ import { readdir, stat, open } from 'node:fs/promises'
 import { createReadStream, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { basename, extname, join, resolve, sep } from 'node:path'
+import { optimizeInPlace } from './src/remux.js'
 import z from '@deepseek-ai/schemastery'
 
 /**
@@ -534,6 +536,73 @@ export function apply(ctx, config) {
       })
     },
   }), 'boot-animation: clip route')
+
+  /**
+   * One clip's index table moved to the front, on request — the card's 优化 button.
+   *
+   * A prefix route with the file name in the query string, for two reasons: these
+   * handlers are handed the raw request (the clip route already reads its own `?v=`
+   * suffix), and an `exact` route matches the whole URL, query included. Nothing in
+   * the pool is written unless this is called: the card only ever REPORTS the
+   * `moov` position, and a decorative plugin that rewrote a user's media on its own
+   * is the behaviour this route exists to keep out of the boot path.
+   */
+  const optimising = new Set()
+  ctx.effect(() => server.register({
+    kind: 'prefix',
+    path: `${ROUTE}/optimize`,
+    handler: (req, res) => {
+      void (async () => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: '这个地址只接受 POST。' })
+          return
+        }
+        const requested = new URL(req.url ?? '/', 'http://localhost').searchParams.get('name') ?? ''
+        // The same containment rule as `resolveClip`: a bare file name from this
+        // pool, nothing that could name a path. Comparing against `basename`
+        // rejects any separator the query carried in, encoded or not.
+        const name = basename(requested)
+        const absolute = resolve(assetDir, name)
+        if (name === '' || name !== requested
+          || !VIDEO_EXTENSIONS.has(extname(name).toLowerCase())
+          || !absolute.startsWith(assetDir + sep)) {
+          sendJson(res, 400, { ok: false, error: '素材名不合法。' })
+          return
+        }
+        if (optimising.has(name)) {
+          sendJson(res, 409, { ok: false, error: '这一条正在处理，稍等一下再点。' })
+          return
+        }
+        optimising.add(name)
+        try {
+          const result = await optimizeInPlace({
+            file: absolute,
+            backupDir: join(assetDir, 'originals'),
+            scratchDir: join(assetDir, '.faststart-work'),
+          })
+          sendJson(res, 200, result)
+        } finally {
+          optimising.delete(name)
+        }
+      })().catch((error) => {
+        if (res.headersSent) {
+          res.end()
+          return
+        }
+        if (error?.code === 'ENOENT') {
+          sendJson(res, 404, { ok: false, error: '素材不在了。' })
+          return
+        }
+        if (typeof error?.code === 'string' && error.code.startsWith('E_')) {
+          // A refusal raised on purpose; its message is written to be shown as is.
+          sendJson(res, 422, { ok: false, error: error.message })
+          return
+        }
+        ctx.logger?.error?.('boot-animation: optimize route failed', error)
+        sendJson(res, 500, { ok: false, error: 'internal' })
+      })
+    },
+  }), 'boot-animation: optimize route')
 
   // `ctx.on` already returns a disposer the fiber tracks, so it is registered
   // directly rather than wrapped in an effect — matching the other subscribers

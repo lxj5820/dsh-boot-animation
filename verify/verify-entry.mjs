@@ -277,10 +277,16 @@ const CFG_PREFIX = 'globalThis.__DSH_BOOT_ANIM_CFG__='
 const injectedConfig = (rows) => JSON.parse(rows[0].text.slice(CFG_PREFIX.length))
 
 const enabled = mount(makeCtx(), Config({}))
-check('two routes registered', enabled.routes.length === 2,
+// Three: the manifest, the clip bytes, and the on-demand rewrite the settings
+// card's 优化 button calls. The rewrite route is a prefix for the same reason the
+// clip route is — the file name travels in its query string, and an exact route
+// matches the whole URL including that query.
+check('three routes registered', enabled.routes.length === 3,
   enabled.routes.map((r) => r.kind + ' ' + r.path).join(', '))
 equal('route kinds/paths', enabled.routes.map((route) => [route.kind, route.path]),
-  [['exact', '/plugins/dsh-boot-animation/clips.json'], ['prefix', '/plugins/dsh-boot-animation/clip']])
+  [['exact', '/plugins/dsh-boot-animation/clips.json'],
+    ['prefix', '/plugins/dsh-boot-animation/clip'],
+    ['prefix', '/plugins/dsh-boot-animation/optimize']])
 check('no ctx.settings read, no warning', enabled.log.length === 0, JSON.stringify(enabled.log))
 
 const enabledRows = render(enabled)
