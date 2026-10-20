@@ -530,5 +530,15 @@ const tail = '\nreturn module.exports; } });\n'
 check('lib/client.js is the current build of src/client.js', BUNDLE === head + CLIENT + tail,
   BUNDLE.length + ' vs ' + (head.length + CLIENT.length + tail.length) + ' bytes')
 
+// The screen is spliced into the index as raw text, and the Host finds where the
+// body begins by searching that text. A tag spelled out anywhere in the script —
+// a COMMENT included, so comments are deliberately not stripped here — is taken
+// for the real one: the script was cut at a commented body tag, failed to parse,
+// and its second half was printed on the page. A closing script tag would end the
+// row the same way in any HTML parser.
+const tags = SCREEN.match(/<\/?(?:body|head|html|script)\b/gi) ?? []
+check('the screen source spells out no document tag, comments included', tags.length === 0,
+  tags.join(' '))
+
 console.log('\n' + (failures === 0 ? 'PASS' : 'FAIL') + ' — ' + (checks - failures) + '/' + checks + ' checks')
 process.exit(failures === 0 ? 0 : 1)

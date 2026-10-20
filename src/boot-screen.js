@@ -27,6 +27,31 @@
   if (!cfg || typeof cfg !== 'object' || typeof cfg.manifest !== 'string') return
   if (globalThis.__DSH_BOOT_ANIM__) return
 
+  // Milestones of the boot pass, in page time (ms since navigation), printed by
+  // the `?dshbootdiag=1` readout. "It takes a few seconds to start" is only
+  // actionable once it says which step the seconds went to.
+  var now = function () {
+    return globalThis.performance && typeof performance.now === 'function' ? Math.round(performance.now()) : 0
+  }
+  var marks = { script: now(), mount: null, manifest: null, src: null, frame: null }
+
+  // The manifest is requested the moment this script runs, not when the overlay
+  // mounts. Nothing about choosing a clip needs the DOM, and every millisecond
+  // spent waiting for it is a millisecond the first frame arrives later. The
+  // boot pass consumes this promise once; a preview requests its own.
+  var requestManifest = function () {
+    return fetch(cfg.manifest, { cache: 'no-store' })
+      .then(function (response) { return response.ok ? response.json() : { clips: [] } })
+  }
+  var earlyManifest = null
+  try {
+    earlyManifest = requestManifest()
+    // Marked handled here; the mount's own chain still sees the rejection.
+    earlyManifest.catch(function () {})
+  } catch (error) {
+    earlyManifest = null
+  }
+
   var HOLD_MS = typeof cfg.holdMs === 'number' ? cfg.holdMs : 15000
   // How long the dissolve into the app takes. Configurable, so it is clamped
   // rather than trusted: a zero would make the overlay vanish between frames and
@@ -309,6 +334,8 @@
   var parts = build()
   var namespace = {
     el: parts.root,
+    // The boot pass's milestones (see `marks`), readable from a console.
+    marks: marks,
     bootedAt: null,
     failed: false,
     // `null` means audio is fine (or was never in question); anything else is the
@@ -965,6 +992,9 @@
         + ' stall=' + (namespace.lastStall ? Math.round((Date.now() - namespace.lastStall) / 1000) + 's ago' : '-')
         + ' err=' + (video.error ? video.error.code : '-')
         + ' audio=' + (namespace.audioBlocked === null ? 'ok' : namespace.audioBlocked)
+        + ' ms=' + [marks.script, marks.mount, marks.manifest, marks.src, marks.frame].map(function (value) {
+          return value === null ? '-' : String(value)
+        }).join('/')
       parts.hint.textContent = text
     }, 800)
   }
@@ -999,8 +1029,12 @@
     ;(document.body || document.documentElement).appendChild(parts.root)
     applyCaptionTokens()
     if (previewName === null) {
-      observeProgress()
-      observeFailure()
+      marks.mount = now()
+      whenKernelPage(function () {
+        observeProgress()
+        observeFailure()
+      })
+      keepAttached()
     } else {
       // An already-booted shell has no kernel boot page, so there is no progress
       // arc to read: a bar stuck at zero would be the one visible lie on an
@@ -1035,10 +1069,12 @@
 
     // Discover the pool, then play one clip. Loading is deferred until the
     // manifest answers so a page load without clips shows only the gradient.
-    fetch(cfg.manifest, { cache: 'no-store' })
-      .then(function (response) { return response.ok ? response.json() : { clips: [] } })
+    var manifest = earlyManifest || requestManifest()
+    earlyManifest = null
+    manifest
       .then(function (payload) {
         globalThis.clearTimeout(manifestWindow)
+        if (previewName === null) marks.manifest = now()
         var published = payload && Array.isArray(payload.clips) ? payload.clips : []
         // The pool the user curated in the settings card. Switching every clip off
         // would leave nothing to play and therefore nothing to trigger the
@@ -1264,6 +1300,7 @@
             settled = true
             globalThis.clearTimeout(advance)
             armStallWatch(video, clip)
+            if (previewName === null && marks.frame === null) marks.frame = now()
             // The fade is driven by an inline style rather than a CSS rule: an
             // inline value cannot lose a specificity contest with anything else on
             // the page. Written only once a frame has actually been presented —
@@ -1337,6 +1374,7 @@
           })
 
           video.src = clip.src
+          if (previewName === null && marks.src === null) marks.src = now()
 
           startClip(video, function () {
             // Playback started. Deliberately does NOT reveal: leaving the paused
@@ -1404,6 +1442,77 @@
       .catch(function () { /* an unreachable pool leaves the gradient */ })
   }
 
+  /**
+   * Run `fn` once the kernel boot page exists.
+   *
+   * The overlay now mounts before the shell module has run, so the boot page it
+   * reads progress and failure from is usually not there yet. It is created inside
+   * the document body, so a childList watch on the body sees it arrive.
+   * @param fn - called once, with the boot page in the document.
+   */
+  function whenKernelPage(fn) {
+    if (document.querySelector('[data-dsh-boot]') !== null || typeof MutationObserver !== 'function') {
+      fn()
+      return
+    }
+    var watch = new MutationObserver(function () {
+      if (document.querySelector('[data-dsh-boot]') === null) return
+      watch.disconnect()
+      fn()
+    })
+    watch.observe(document.body || document.documentElement, { childList: true, subtree: true })
+  }
+
+  /**
+   * Put the overlay back if the page drops it before the exit.
+   *
+   * Mounting this early means the overlay is in the body while the shell builds
+   * its own boot page and the app. Nothing there is known to clear the body, but
+   * if anything ever does, the cost would be the kernel page flashing through
+   * with no way back — so the overlay is re-appended until it has started leaving.
+   */
+  function keepAttached() {
+    if (typeof MutationObserver !== 'function' || !document.body) return
+    var root = parts.root
+    var guard = new MutationObserver(function () {
+      if (parts.root !== root || root.getAttribute('data-state') === 'leaving') {
+        guard.disconnect()
+        return
+      }
+      if (!root.isConnected && document.body) document.body.appendChild(root)
+    })
+    guard.observe(document.body, { childList: true })
+  }
+
+  /**
+   * Run `fn` as soon as `document.body` exists.
+   *
+   * This used to wait for DOMContentLoaded, which fires only after the deferred
+   * shell module has been fetched and has run — and that module is what draws the
+   * kernel boot page. So the kernel page showed first, and only then did this
+   * screen mount and begin loading its clip. The parser creates the body element
+   * right after this head-placed script, well before any module runs; that is the
+   * moment.
+   *
+   * No tag may be spelled out anywhere in this file, comments included: the Host
+   * splices its rows into the index by finding the first body tag in the TEXT, and
+   * one written in a comment here cut this script in two and printed the rest on
+   * the page. verify-options.mjs refuses the file if one comes back.
+   * @param fn - called once, with `document.body` present.
+   */
+  function whenBody(fn) {
+    var done = false
+    var go = function () {
+      if (done || !document.body) return
+      done = true
+      if (watch) watch.disconnect()
+      fn()
+    }
+    var watch = typeof MutationObserver === 'function' ? new MutationObserver(go) : null
+    if (watch) watch.observe(document.documentElement, { childList: true })
+    document.addEventListener('DOMContentLoaded', go, { once: true })
+  }
+
   if (document.body) mount()
-  else document.addEventListener('DOMContentLoaded', mount, { once: true })
+  else whenBody(mount)
 })()

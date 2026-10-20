@@ -229,8 +229,10 @@ ctx.inject(['slots', 'settingsScope'], (owner) => {
 给地址加 `?dshbootdiag=1`，提示行会变成实时读数：
 
 ```
-diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=1 tail=0 fade=2s stall=- err=- audio=refused
+diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=1 tail=0 fade=2s stall=- err=- audio=refused ms=12/14/40/41/220
 ```
+
+`ms` = 五个时刻（页面时间，毫秒）：脚本开始 / 覆盖层挂载 / 素材清单返回 / 设置视频地址 / 第一帧显形。「等几秒才开始播」或「先闪一下 DSH 界面」就看哪两格之间差得最多——挂载那格若明显晚于脚本那格，覆盖层就挂晚了。
 
 `shown` = 画面是否已显形 · `rs` = readyState · `muted` = 是否静音 · `t` = 播放位置 · `dur` = 片子时长 · `paused` / `ended` = 元素自身的状态 · `done` = 片子是否已放完 · `boot` = 内核是否就绪 · **`tail` = 尾部溶解是否已经开始**（`1` 的那一刻 `t` 应该正好是 `dur − 2`） · `fade` = 标称淡入时长 · `stall` = 距上次卡顿多久 · `err` = MediaError 码 · `audio` = 声音策略结果（`ok` / `refused` / `muted-by-user`，关掉声音时是 `disabled`）。
 
@@ -239,6 +241,8 @@ diag shown=1 rs=4 muted=true t=3.2 dur=8.1 paused=false ended=false done=0 boot=
 ## 为什么是插件而不是改源码
 
 启动页 `packages/client/web/src/boot-page.ts` 由内核在 shell 模块脚本里同步创建。唯一比它更早的时机是**索引注入**：本插件在 Host 侧订阅 `webserver/index-inject`，往 `<head>` 插一行解析阻塞脚本。那行脚本在内核启动页出现之前就已经占住了视口。
+
+> 这句话过去**并不成立**：脚本虽然最早执行，覆盖层却等 `DOMContentLoaded` 才挂载，而这个事件要等 shell 模块下载并执行完——启动页正是在那里画出来的。于是每次开机都先闪一下 DSH 自己的启动页，再出现覆盖层。现在覆盖层在 `<body>` 一出现就挂载（`whenBody`），进度与失败观察改为等启动页出现后再接上（`whenKernelPage`），素材清单在脚本执行时就开始请求。
 
 顺带避开一个坑：入场层挂在 `document.body` 上、**不放进 `#root`**，所以 `ui-renderer` 挂载时 `#root` 里没有 `[data-dsh-boot]`，走的是 `createRoot` 而不是 `hydrateRoot`，不存在 hydration 内容不匹配的问题。
 
