@@ -20,10 +20,11 @@
 // The originals are never modified. Deleting `faststart.*.mp4` in the assets
 // directory removes the duplicates once you have confirmed playback.
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { basename, extname, join, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
+const projectRoot = fileURLToPath(new URL('..', import.meta.url))
 const assetDir = fileURLToPath(new URL('../assets/videos', import.meta.url))
 const stagingDir = fileURLToPath(new URL('../assets/videos/faststart', import.meta.url))
 const write = process.argv.includes('--write')
@@ -255,17 +256,69 @@ export function remux(file, target, writeTo) {
 }
 
 /**
+ * Whether `target` is `root` or lies beneath it.
+ *
+ * Compared through `relative()` rather than a string prefix: `fileURLToPath`
+ * yields a root that already ends in a separator, so `root + sep` doubled it and
+ * rejected the default asset directory.
+ * @param root - containing directory.
+ * @param target - path to test.
+ * @returns true when no `..` step is needed to reach `target` from `root`.
+ */
+export function isWithinProject(root, target) {
+  const rel = relative(resolve(root), resolve(target))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+/** Resolve symlinks when the path exists; a path that does not exist stays lexical. */
+function realOrSelf(path) {
+  try {
+    return realpathSync(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return resolve(path)
+    throw error
+  }
+}
+
+/**
+ * Decide which directory the CLI works in and where it writes.
+ *
+ * Containment is judged on real paths, so a symlink inside the project that points
+ * outside it is refused as well, including a pre-existing `faststart` output
+ * directory that is itself a link.
+ * @param argv - command-line arguments.
+ * @param root - project root; a parameter so a suite can use a scratch tree.
+ * @param defaults - the default work and output directories.
+ * @returns the directories, or a refusal with its message.
+ */
+export function resolveWorkDir(argv, root, defaults = { workDir: assetDir, outDir: stagingDir }) {
+  const dirIndex = argv.indexOf('--dir')
+  const custom = dirIndex >= 0
+  const workDir = custom && argv[dirIndex + 1] !== undefined ? resolve(argv[dirIndex + 1]) : defaults.workDir
+  const outDir = custom ? join(workDir, 'faststart') : defaults.outDir
+  const realRoot = realOrSelf(root)
+  for (const dir of [workDir, outDir]) {
+    if (!isWithinProject(realRoot, realOrSelf(dir))) {
+      return { ok: false, message: `--dir must stay inside the project directory (${realRoot}); refusing ${dir}` }
+    }
+  }
+  return { ok: true, workDir, outDir }
+}
+
+/**
  * The command-line entry, skipped when this file is imported.
  *
- * `--dir <path>` points the tool at another directory, which is how the transform
- * is exercised on a scratch copy.
+ * `--dir <path>` points the tool at another directory inside the project, which
+ * is how the transform is exercised on a scratch copy.
  */
 function runCli() {
-  const dirIndex = process.argv.indexOf('--dir')
-  const workDir = dirIndex >= 0 && process.argv[dirIndex + 1] !== undefined
-    ? resolve(process.argv[dirIndex + 1])
-    : assetDir
-  const outDir = dirIndex >= 0 ? join(workDir, 'faststart') : stagingDir
+  const dirs = resolveWorkDir(process.argv, projectRoot)
+  if (!dirs.ok) {
+    console.log(dirs.message)
+    process.exitCode = 1
+    return
+  }
+  const { workDir, outDir } = dirs
 
   let clips = []
   try {

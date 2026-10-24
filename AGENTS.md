@@ -112,6 +112,7 @@ node build-client.mjs          # only if src/client.js changed
 node verify/verify-entry.mjs   # Host half: Config, injection, manifest route
 node verify/verify-degraded.mjs # the old-schema-library degradation path
 node verify/verify-options.mjs  # the three interaction switches, against a stub DOM
+node verify/verify-faststart.mjs # tools/faststart.mjs --dir containment (incl. symlinks)
 ```
 
 `verify/` **is** part of this tree, and those three suites are what it can run
