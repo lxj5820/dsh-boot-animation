@@ -160,15 +160,18 @@ function patchOffsets(moovBytes, tables, shift) {
   for (const table of tables) {
     for (let index = 0; index < table.count; index += 1) {
       const at = table.dataAt + index * table.width
-      let value = table.width === 4 ? out.readUInt32BE(at) : Number(out.readBigUInt64BE(at))
-      const moved = value + shift
       if (table.width === 4) {
+        const value = out.readUInt32BE(at)
+        const moved = value + shift
         if (moved < 0 || moved > 0xffffffff) {
           throw new Error('a 32-bit chunk offset overflowed; the file needs co64, use ffmpeg')
         }
         out.writeUInt32BE(moved, at)
       } else {
-        out.writeBigUInt64BE(BigInt(moved), at)
+        // 64-bit arithmetic all the way, not through a Number: a co64 entry can name
+        // an offset above 2^53, which Number cannot represent exactly, and rounding it
+        // would corrupt the only index the file has.
+        out.writeBigUInt64BE(out.readBigUInt64BE(at) + BigInt(shift), at)
       }
     }
   }
@@ -229,14 +232,29 @@ export function remux(file, target, writeTo) {
   const newMoov = output.subarray(moovStart, moovStart + patched.length)
   const newTables = chunkOffsetTables(newMoov)
   if (newTables.length !== tables.length) throw new Error('table count changed')
+  // The self-check reads each entry at ITS OWN width. This used to read 32 bits out of
+  // both sides no matter what `width` said, so every co64 file — 8 bytes per entry — was
+  // compared against a value assembled from two neighbouring entries' halves, never
+  // matched, and reported `entry N not shifted correctly`. The rewrite itself was fine
+  // and the original was restored, so the damage was a FAILED button on exactly the
+  // large clips that most need faststart, not a corrupted file.
+  //
+  // The comparison is done in BigInt on purpose: a co64 offset may legitimately exceed
+  // 2^53, where Number silently rounds and a "match" would be a coincidence.
+  const shift = BigInt(layout.shift)
   for (let index = 0; index < tables.length; index += 1) {
+    const width = tables[index].width
     const oldAt = tables[index].dataAt
     const newAt = newTables[index].dataAt
     for (let entry = 0; entry < tables[index].count; entry += 1) {
-      const delta = tables[index].width
-      const was = moovBytes.readUInt32BE(oldAt + entry * delta)
-      const now = newMoov.readUInt32BE(newAt + entry * delta)
-      if (now !== was + layout.shift) throw new Error(`entry ${String(entry)} not shifted correctly`)
+      const at = entry * width
+      const was = width === 4
+        ? BigInt(moovBytes.readUInt32BE(oldAt + at))
+        : moovBytes.readBigUInt64BE(oldAt + at)
+      const now = width === 4
+        ? BigInt(newMoov.readUInt32BE(newAt + at))
+        : newMoov.readBigUInt64BE(newAt + at)
+      if (now !== was + shift) throw new Error(`entry ${String(entry)} not shifted correctly`)
     }
   }
 

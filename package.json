@@ -1,9 +1,11 @@
 {
   "name": "dsh-boot-animation",
-  "version": "0.2.0",
-  "description": "鲸鱼娘启动加载动画：点击进入（Esc/空格放行）、多片随机、启动进度可见、失败有兜底。不改 DSH 本体源码。",
+  "version": "0.3.0",
+  "description": "DSH 启动动画与屏保：全屏短片片尾交叉溶解进界面；闲置后全屏盖住界面，点击或按键收回。支持视频/图片/动图/Live2D，设置全在界面里。不改 DSH 本体源码。",
   "license": "MIT",
+  "licenseNote": "MIT covers the code only. The video clips under assets/videos/ and assets/screensaver/ are the author's own artwork, all rights reserved, not for resale or commercial use. See LICENSE.",
   "author": "lxj5820",
+  "icon": "assets/icon/icon-160.png",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lxj5820/dsh-boot-animation.git"
@@ -26,9 +28,16 @@
     "assets",
     "lib",
     "src",
+    "tools",
     "cordis.patch.yml",
     "entry.js",
-    "package.json"
+    "build-client.mjs",
+    "package.json",
+    "README.md",
+    "MANUAL.md",
+    "AGENTS.md",
+    "INSTALL.md",
+    "LICENSE"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

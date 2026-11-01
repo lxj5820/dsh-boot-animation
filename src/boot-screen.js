@@ -27,30 +27,15 @@
   if (!cfg || typeof cfg !== 'object' || typeof cfg.manifest !== 'string') return
   if (globalThis.__DSH_BOOT_ANIM__) return
 
-  // Milestones of the boot pass, in page time (ms since navigation), printed by
-  // the `?dshbootdiag=1` readout. "It takes a few seconds to start" is only
-  // actionable once it says which step the seconds went to.
-  var now = function () {
-    return globalThis.performance && typeof performance.now === 'function' ? Math.round(performance.now()) : 0
-  }
-  var marks = { script: now(), mount: null, manifest: null, src: null, frame: null }
-
-  // The manifest is requested the moment this script runs, not when the overlay
-  // mounts. Nothing about choosing a clip needs the DOM, and every millisecond
-  // spent waiting for it is a millisecond the first frame arrives later. The
-  // boot pass consumes this promise once; a preview requests its own.
-  var requestManifest = function () {
-    return fetch(cfg.manifest, { cache: 'no-store' })
-      .then(function (response) { return response.ok ? response.json() : { clips: [] } })
-  }
-  var earlyManifest = null
-  try {
-    earlyManifest = requestManifest()
-    // Marked handled here; the mount's own chain still sees the rejection.
-    earlyManifest.catch(function () {})
-  } catch (error) {
-    earlyManifest = null
-  }
+  // The media renderer factory, injected as its own head row immediately before
+  // this script. It is what turns a pool entry into something showable, and it is
+  // the only place that knows a video from an image from a Live2D model.
+  //
+  // Its absence is survivable and must stay that way: a screen that threw here
+  // would take the whole boot page down with it, so a missing factory degrades to
+  // "nothing in the pool can be rendered", which is a path the loader already has.
+  var renderers = globalThis.__DSH_BOOT_ANIM_RENDERERS__
+  var makeRenderer = renderers && typeof renderers.create === 'function' ? renderers.create : null
 
   var HOLD_MS = typeof cfg.holdMs === 'number' ? cfg.holdMs : 15000
   // How long the dissolve into the app takes. Configurable, so it is clamped
@@ -103,20 +88,6 @@
   // outlives the exit (see enter), and only `span` when the clip's own end is what
   // ends the exit — there the track stops with the picture by itself.
   var AUDIO_GRACE_MS = 1300
-
-  // How long a clip may stop advancing before the screen is released anyway.
-  //
-  // Every other bound in this file sits BEFORE the first frame: the manifest
-  // window, the six-second no-frame watchdog, the audio window, the unknown-length
-  // fallback. Once `reveal()` has run, none of them is armed any more, and the
-  // only things left that can release the screen are the clip's own `ended`, a
-  // decode error, and the tail dissolve. A clip that paints a frame and then
-  // wedges on the network therefore had no bound at all. `timeupdate` is the
-  // heartbeat: media time keeps moving while a background tab has its frames
-  // throttled, so silence there means bytes stopped arriving rather than that the
-  // page is idle.
-  var STALL_LIMIT_MS = 6000
-
   var ARC_MIN = 72
   var ARC_SPAN = 216
   var cache = { startedAt: Date.now(), current: null, loaded: false }
@@ -163,8 +134,17 @@
     return out
   }
 
-  function pickClip(clips) {
-    var recentKey = 'dsh-boot-animation:recent'
+  /**
+   * Pick one entry from a pool, preferring one that has not been seen recently.
+   *
+   * Shared by both pools with a different history key, because "do not repeat the
+   * last one" is the same rule for the boot pool and for the screensaver pool — and
+   * because two copies of it would drift apart the first time one was fixed.
+   * @param entries - the pool to choose from; must be non-empty.
+   * @param recentKey - sessionStorage key holding the names seen recently.
+   * @returns the chosen entry.
+   */
+  function pickFrom(entries, recentKey) {
     var recent = []
     try {
       recent = JSON.parse(sessionStorage.getItem(recentKey) || '[]')
@@ -172,17 +152,21 @@
     } catch (error) {
       recent = []
     }
-    var fresh = clips.filter(function (clip) { return recent.indexOf(clip.name) < 0 })
-    var pool = fresh.length > 0 ? fresh : clips
+    var fresh = entries.filter(function (entry) { return recent.indexOf(entry.name) < 0 })
+    var pool = fresh.length > 0 ? fresh : entries
     var chosen = pool[Math.floor(Math.random() * pool.length)]
     recent.push(chosen.name)
-    while (recent.length > Math.max(clips.length - 1, 1)) recent.shift()
+    while (recent.length > Math.max(entries.length - 1, 1)) recent.shift()
     try {
       sessionStorage.setItem(recentKey, JSON.stringify(recent))
     } catch (error) {
       /* private mode: rotation degrades to plain random */
     }
     return chosen
+  }
+
+  function pickClip(clips) {
+    return pickFrom(clips, 'dsh-boot-animation:recent')
   }
 
   function style() {
@@ -198,13 +182,22 @@
       '.dshba[data-state=leaving]{opacity:0;pointer-events:none}',
       // `cover`, because letterboxing reads as black bars and was rejected. The
       // mask feathers the crop so it does not end in a hard edge.
-      '.dshba-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;',
+      //
+      // One class for every kind, not `.dshba-video`: the stage holds a video, an
+      // image or a canvas depending on what the entry turned out to be, and all
+      // three are laid out and revealed identically.
+      '.dshba-media{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;',
       'opacity:0;transition:opacity 1.1s ease;',
       '-webkit-mask-image:radial-gradient(ellipse 88% 82% at 50% 50%,#000 62%,transparent 100%);',
       'mask-image:radial-gradient(ellipse 88% 82% at 50% 50%,#000 62%,transparent 100%)}',
       // Quoted for the same reason as the hint switch below: `[data-shown=1]` is
       // an invalid selector and the rule never applied.
-      '.dshba-video[data-shown="1"]{opacity:1}',
+      '.dshba-media[data-shown="1"]{opacity:1}',
+      // A canvas has no intrinsic size, so `object-fit` does not apply to it and
+      // `width/height: 100%` alone would stretch the model. `contain` keeps the
+      // model's own aspect ratio, which is the only sensible default for artwork
+      // whose framing the user controls in Cubism.
+      '.dshba-live2d{object-fit:contain}',
       '.dshba-veil{position:absolute;inset:0;pointer-events:none;',
       'background:radial-gradient(ellipse 86% 78% at 50% 50%,transparent 44%,rgba(4,10,18,.45) 78%,rgba(2,6,12,.7) 100%)}',
       '.dshba-ui{position:absolute;left:0;right:0;bottom:0;padding:26px 30px 24px;',
@@ -253,16 +246,11 @@
     root.setAttribute('aria-label', 'DSH boot animation')
     root.setAttribute('data-state', 'idle')
     root.setAttribute('data-hint', SHOW_HINT ? '1' : '0')
-    var video = document.createElement('video')
-    video.className = 'dshba-video'
-    video.muted = true
-    // Looping only in `click` mode. The other two modes are driven by the clip's
-    // own end, and a looping element never fires `ended` — with `loop` on, the
-    // automatic hand-off would simply never happen.
-    video.loop = ENTER_MODE === 'click'
-    video.playsInline = true
-    video.setAttribute('playsinline', '')
-    video.preload = 'auto'
+
+    // One stage, holding one entry from the clips pool: it plays once, and its own
+    // end (or the user) hands over to the app.
+    var intro = document.createElement('div')
+    intro.className = 'dshba-stage'
     var veil = document.createElement('div')
     veil.className = 'dshba-veil'
     var ui = document.createElement('div')
@@ -309,13 +297,14 @@
     ui.appendChild(title)
     ui.appendChild(bar)
     ui.appendChild(hint)
-    root.appendChild(video)
+    root.appendChild(intro)
     root.appendChild(veil)
     if (sound) root.appendChild(sound)
     root.appendChild(ui)
-    // The video part is a live view, not a snapshot: a clip that fails to play is
-    // replaced by a fresh element, so anything holding the old node would pause
-    // the wrong element on exit.
+    // The media part is a live view, not a snapshot: an entry that fails to play is
+    // replaced by a fresh renderer, so anything holding the old node would pause the
+    // wrong element on exit.
+    var introRenderer = null
     return {
       css: css,
       root: root,
@@ -324,8 +313,21 @@
       ui: ui,
       veil: veil,
       sound: sound,
-      video: function () { return video },
-      replaceVideo: function (next) { video = next },
+      intro: intro,
+      /** The renderer currently showing the entry, or null. */
+      media: function () { return introRenderer },
+      setMedia: function (next) { introRenderer = next },
+      /**
+       * Put a renderer's node into a layer, disposing whatever was there.
+       *
+       * Disposal matters for more than tidiness: a Live2D adapter holds a render
+       * loop and a WebGL context, and replacing it without calling dispose leaks
+       * both for the life of the page.
+       */
+      place: function (layer, renderer) {
+        while (layer.firstChild) layer.removeChild(layer.firstChild)
+        layer.appendChild(renderer.el())
+      },
     }
   }
 
@@ -334,8 +336,6 @@
   var parts = build()
   var namespace = {
     el: parts.root,
-    // The boot pass's milestones (see `marks`), readable from a console.
-    marks: marks,
     bootedAt: null,
     failed: false,
     // `null` means audio is fine (or was never in question); anything else is the
@@ -381,7 +381,13 @@
    */
   function renderSound(hint) {
     if (!parts.sound) return
-    var audible = !parts.video().muted && namespace.audioBlocked === null
+    // The current intro renderer, which may be null before an entry is chosen or
+    // after every candidate failed. A renderer that cannot make a sound at all
+    // (an image, a model) is treated as silent rather than as audible, so the
+    // button never claims sound that no element could produce.
+    var media = parts.media()
+    var audible = media !== null && typeof media.isMuted === 'function'
+      && media.isMuted() !== true && namespace.audioBlocked === null
     parts.sound.textContent = audible ? SOUND_TEXT_ON : SOUND_TEXT_OFF
     // The glyph carries the state at a glance and the words stay available on
     // hover, so nothing is lost by keeping them off the button face.
@@ -409,6 +415,7 @@
    * code path it always was for a real start.
    */
   var previewName = null
+  var previewPool = 'clips'
   var previewDone = null
 
   /**
@@ -465,6 +472,10 @@
     namespace.el = parts.root
     wireRoot(parts.root)
     previewName = options.name
+    // Which pool the previewed name belongs to. A screensaver preview is a different
+    // manifest, because the two pools are separate directories and one name can
+    // exist in both.
+    previewPool = options.pool === 'screensaver' ? 'screensaver' : 'clips'
     previewDone = typeof options.onDone === 'function' ? options.onDone : null
 
     // Every piece of run state the first pass left behind. Missing any one of them
@@ -573,17 +584,6 @@
   // when both the clip is over and the kernel is actually ready.
   var clipDone = false
 
-  // The stall watchdog's handle, kept out here so `enter()` can stop it on every
-  // exit path rather than only the ones that happen to remember.
-  var stallWatch = null
-  var lastProgress = 0
-
-  function stopStallWatch() {
-    if (stallWatch === null) return
-    globalThis.clearInterval(stallWatch)
-    stallWatch = null
-  }
-
   // Set by the loader to the current clip's tail check.
   //
   // There is a genuine gap without it: if the kernel becomes ready while the clip
@@ -609,6 +609,9 @@
     if (ENTER_MODE === 'click') return
     if (!clipDone || namespace.failed) return
     if (namespace.bootedAt === null) {
+      // The clip is over but the kernel is not ready. The last frame is simply
+      // held, which is the behaviour every version before the screensaver had.
+      //
       // Deliberately not the amber attention state: nothing is wrong yet, and
       // flashing the warning for an ordinary slow start would cry wolf on a
       // condition that resolves itself. The amber hint is saved for a real stall.
@@ -626,69 +629,30 @@
   function toggleSound() {
     // Nothing to toggle when the option is off; the button is not even built.
     if (!SOUND_ON) return
-    var video = parts.video()
-    if (!video.muted) {
-      video.muted = true
+    var media = parts.media()
+    // Only a renderer with an audio path can be toggled. A still image or a model
+    // has no mute/volume methods, so the control does nothing rather than throwing
+    // — the button is only ever built when the setting allows sound, and this is
+    // the second guard behind that.
+    if (media === null || typeof media.mute !== 'function' || typeof media.start !== 'function') return
+    if (media.isMuted() !== true) {
+      media.mute(true)
       setAudioBlocked('muted-by-user')
       return
     }
-    video.muted = false
+    media.mute(false)
     setAudioBlocked(null)
-    var played = video.play()
+    var played = media.start()
     if (played && typeof played.catch === 'function') {
       played.catch(function (reason) {
-        video.muted = true
+        media.mute(true)
         // The element is muted again, so the tooltip is what says this press was
         // refused rather than merely silent.
         setAudioBlocked(reason && reason.name ? reason.name : 'refused', SOUND_HINT_REFUSED)
-        var retryMuted = video.play()
+        var retryMuted = media.start()
         if (retryMuted && typeof retryMuted.catch === 'function') retryMuted.catch(function () {})
       })
     }
-  }
-
-  /**
-   * Call back once the clip has a frame to show — starting it is not that moment.
-   *
-   * A resolved `play()` promise only means the element left the paused state. It
-   * says nothing about whether a picture exists, and treating it as success
-   * disarmed the retry watchdog, so a clip whose frames never arrived left the
-   * screen on the bare gradient with no error and no further attempt.
-   *
-   * Nor may this wait for a frame to be COMPOSITED, which was the first attempt at
-   * fixing that and locked the screen up instead: the element starts fully
-   * transparent and this callback is what makes it visible, so
-   * `requestVideoFrameCallback` can sit waiting for a frame that will not be
-   * submitted until the very style change it is blocking. The signal is *decoded
-   * data for the first frame*, from whichever report arrives first, with a
-   * presented frame kept as one more route to the same fact.
-   * @param video - the clip element.
-   * @param done - called once the clip can show something.
-   */
-  function whenFramePresents(video, done) {
-    var fired = false
-    var once = function () {
-      if (fired) return
-      fired = true
-      done()
-    }
-    // "Data for the current playback position is available", which for a fresh
-    // element is the first frame.
-    if (video.readyState >= 2) {
-      once()
-      return
-    }
-    video.addEventListener('loadeddata', once, { once: true })
-    video.addEventListener('canplay', once, { once: true })
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      video.requestVideoFrameCallback(once)
-    }
-    // Advancing time is the same fact reported by none of the above, and it is the
-    // case a MediaRecorder WebM can land in: it may never report `readyState >= 2`
-    // and yet be playing frames.
-    video.addEventListener('timeupdate', function () {
-      if (video.currentTime > 0) once()
-    })
   }
 
   /**
@@ -713,22 +677,24 @@
    * while the tab is visible, and it also stops when the tab is not — while the
    * exit's own timers keep running. The deadline is therefore what guarantees
    * silence at the end of the exit no matter what the compositor did.
-   * @param video - the clip whose audio is playing.
+   * @param media - the renderer whose audio is playing. It must expose
+   *   `setVolume`/`getVolume`/`isMuted`; the caller checks that before calling,
+   *   because a renderer with no audio path (an image, a model) has none of them.
    * @param span - the ramp duration in ms: the exit's span, and for a detached
    *   clip that same span plus AUDIO_GRACE_MS.
    */
-  function fadeOutClipAudio(video, span) {
-    var from = video.volume
+  function fadeOutClipAudio(media, span) {
+    var from = media.getVolume()
     // Nothing to take down: a muted element is already silent, and a volume that
     // is not a positive number (some environments report NaN before metadata) has
     // no level to ramp from.
-    if (video.muted || !(from > 0)) return
+    if (media.isMuted() === true || !(from > 0)) return
     var startedAt = Date.now()
     var done = false
     var silence = function () {
       if (done) return
       done = true
-      video.volume = 0
+      media.setVolume(0)
     }
     var step = function () {
       if (done) return
@@ -737,7 +703,7 @@
         silence()
         return
       }
-      video.volume = from * (1 - progress)
+      media.setVolume(from * (1 - progress))
       nextFrame(step)
     }
     step()
@@ -764,20 +730,26 @@
   function enter(fadeMs, tail) {
     if (parts.root.getAttribute('data-state') === 'leaving') return
     entered = true
-    stopStallWatch()
 
     var span = typeof fadeMs === 'number' && fadeMs > 0
       ? Math.max(Math.min(fadeMs, FADE_MS), 120)
       : FADE_MS
 
-    var video = parts.video()
-    // A clip that has already reached its end must not be replayed on the way
-    // out. The sound retry calls play() again, and play() on a finished element
-    // seeks back to zero and starts the whole thing over — so the hand-off at the
-    // end of a clip would restart the animation underneath the fade. The retry is
-    // only meaningful while there are still frames left to hear it over.
-    var finished = video.ended === true
-    var live = !finished && !video.paused && tail !== true
+    var media = parts.media()
+    // A renderer that already finished must not be replayed on the way out. The
+    // sound retry calls start() again, and starting a finished element seeks back
+    // to zero and runs the whole thing over — so the hand-off at the end of a clip
+    // would restart the animation underneath the fade. The retry is only meaningful
+    // while there are still frames left to hear it over.
+    //
+    // Everything below that asks about the timeline is guarded on the method
+    // existing, because a still image and a Live2D model have no `ended`, no
+    // `paused` and no volume: for those the answers are "not finished", "not
+    // running as a timeline" and "nothing to fade", which is exactly the behaviour
+    // each guard produces.
+    var finished = media !== null && typeof media.isEnded === 'function' && media.isEnded() === true
+    var running = media !== null && typeof media.isPaused === 'function' && media.isPaused() !== true
+    var live = !finished && running && tail !== true
     // The retry that lets a skip carry the sound out with the picture. Not with
     // click-to-enter: there the press is only ever the entry, and turning audio on
     // as a side effect of leaving is exactly the second meaning the option removes.
@@ -790,8 +762,28 @@
     // overlay must not keep painting over the app while it exits. Detached, the
     // element plays its ramp out with nothing on screen. A clip that already ended
     // has no audio left to fade, so it simply goes out with everything else.
+    //
+    // Only a renderer that HAS a volume is detached, which means only a video: an
+    // image or a model has no audio to preserve through the exit, so moving it out
+    // of the overlay would buy nothing and cost a layout read.
+    //
+    // The test is "is this element currently in the page", never a count of
+    // ancestors. The media element sits at body > .dshba > .dshba-stage > media
+    // (build() appends the stage to the root and place() puts the renderer inside
+    // it), so the depth this used to compare — parentNode.parentNode === body —
+    // was off by one, and the whole detach path below never ran. What makes a
+    // detach meaningful is that the document is rendering the element right now,
+    // because an element cut out of the document mid-ramp is exactly the hard stop
+    // this fade exists to remove.
+    //
+    // The media's own rules survive the move: `.dshba-media` (the mask and the
+    // default opacity) and `.dshba-media[data-shown="1"]` select on the element
+    // and on its own attribute, never on the `.dshba` ancestor, and the sheet
+    // itself stays in document.head. The opacity that makes the element visible is
+    // written inline by reveal(), so it travels with the node.
+    var video = media !== null && typeof media.setVolume === 'function' ? media.el() : null
     var standalone = false
-    if (live && video.parentNode && video.parentNode.parentNode === document.body) {
+    if (live && video !== null && document.body && document.body.contains(video)) {
       var box = video.getBoundingClientRect()
       video.style.position = 'fixed'
       video.style.left = box.left + 'px'
@@ -813,7 +805,9 @@
     // itself at the end of `span`, so `span` is where its sound has to be gone.
     // Started after the detach, because removing the overlay is what would cut the
     // ramp short.
-    if (!finished) fadeOutClipAudio(video, standalone ? span + AUDIO_GRACE_MS : span)
+    if (!finished && media !== null && typeof media.setVolume === 'function') {
+      fadeOutClipAudio(media, standalone ? span + AUDIO_GRACE_MS : span)
+    }
 
     // The WHOLE overlay fades as a unit — background gradient, clip and chrome
     // together — and is then removed. Fading only the chrome first, as an earlier
@@ -871,11 +865,16 @@
     } else {
       // A tail dissolve's clip is over by the end of `span` (the ramp is exactly
       // that long), so the pause lands just after the ramp and the clip's own end.
+      //
+      // Cleanup goes through the RENDERER, not the element: only a video has a
+      // `pause`, and a Live2D adapter owns a render loop and a GL context that must
+      // be released here rather than left running for the life of the page.
       globalThis.setTimeout(function () {
+        if (media === null || typeof media.dispose !== 'function') return
         try {
-          video.pause()
+          media.dispose()
         } catch (error) {
-          /* an unplayed video needs no pause */
+          /* the renderer's own cleanup is best effort */
         }
       }, span + 150)
     }
@@ -896,11 +895,15 @@
 
   function press() {
     if (entered) return
-    // A clip that has already finished is never a sound-unlock target: the retry
-    // path calls play(), and play() on a finished element restarts it from zero.
-    // That case is reachable — the clip can end while the kernel is still
-    // starting — and pressing then means "let me in", not "replay that".
-    var finished = parts.video().ended === true
+    // An entry that has already finished is never a sound-unlock target: the retry
+    // path calls start(), and starting a finished element seeks back to zero and
+    // replays it. That case is reachable — the entry can end while the kernel is
+    // still starting — and pressing then means "let me in", not "replay that".
+    //
+    // A renderer without `isEnded` (an image, a model) can never be finished in
+    // this sense, so it is simply not a blocker for the entry below.
+    var media = parts.media()
+    var finished = media !== null && typeof media.isEnded === 'function' && media.isEnded() === true
     // Click-to-enter skips the unlock: this press IS the entry, so there is no
     // first press spent on audio and no second press needed. With sound off the
     // condition below is already false (no audioRetry was ever armed), and this
@@ -975,14 +978,19 @@
     if (globalThis.location.search.indexOf('dshbootdiag=1') < 0) return
     setInterval(function () {
       if (parts.root.getAttribute('data-state') === 'leaving') return
-      var video = parts.video()
-      var text = 'diag shown=' + (video.getAttribute('data-shown') || '-')
-        + ' rs=' + video.readyState
-        + ' muted=' + video.muted
-        + ' t=' + (video.currentTime || 0).toFixed(1)
-        + ' dur=' + (Number.isFinite(video.duration) ? video.duration.toFixed(1) : '?')
-        + ' paused=' + video.paused
-        + ' ended=' + video.ended
+      var media = parts.media()
+      // Every field is answered through the renderer and defaults to '-' when the
+      // renderer has no such concept, so the line stays readable for an image or a
+      // model instead of printing `undefined` for facts that do not exist.
+      var el = media === null ? null : media.el()
+      var num = function (value) { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(1) : '?' }
+      var text = 'diag kind=' + (media === null ? '-' : media.kind)
+        + ' shown=' + (el === null ? '-' : (el.getAttribute('data-shown') || '-'))
+        + ' muted=' + (media !== null && typeof media.isMuted === 'function' ? media.isMuted() : '-')
+        + ' t=' + (media !== null && typeof media.currentTime === 'function' ? num(media.currentTime()) : '-')
+        + ' dur=' + (media !== null && typeof media.duration === 'function' ? num(media.duration()) : '-')
+        + ' paused=' + (media !== null && typeof media.isPaused === 'function' ? media.isPaused() : '-')
+        + ' ended=' + (media !== null && typeof media.isEnded === 'function' ? media.isEnded() : '-')
         + ' done=' + (clipDone ? 1 : 0)
         + ' boot=' + (namespace.bootedAt === null ? 0 : 1)
         + ' tail=' + (namespace.tailEntered ? 1 : 0)
@@ -990,11 +998,8 @@
         + ' fail=' + (namespace.failures || '-')
         + ' fade=' + (FADE_MS / 1000) + 's'
         + ' stall=' + (namespace.lastStall ? Math.round((Date.now() - namespace.lastStall) / 1000) + 's ago' : '-')
-        + ' err=' + (video.error ? video.error.code : '-')
+        + ' err=' + (media !== null && typeof media.mediaError === 'function' ? media.mediaError() : '-')
         + ' audio=' + (namespace.audioBlocked === null ? 'ok' : namespace.audioBlocked)
-        + ' ms=' + [marks.script, marks.mount, marks.manifest, marks.src, marks.frame].map(function (value) {
-          return value === null ? '-' : String(value)
-        }).join('/')
       parts.hint.textContent = text
     }, 800)
   }
@@ -1029,12 +1034,8 @@
     ;(document.body || document.documentElement).appendChild(parts.root)
     applyCaptionTokens()
     if (previewName === null) {
-      marks.mount = now()
-      whenKernelPage(function () {
-        observeProgress()
-        observeFailure()
-      })
-      keepAttached()
+      observeProgress()
+      observeFailure()
     } else {
       // An already-booted shell has no kernel boot page, so there is no progress
       // arc to read: a bar stuck at zero would be the one visible lie on an
@@ -1067,17 +1068,23 @@
       releaseWithoutClip('素材清单没有回应 · 就绪后自动进入')
     }, 10000)
 
-    // Discover the pool, then play one clip. Loading is deferred until the
-    // manifest answers so a page load without clips shows only the gradient.
-    var manifest = earlyManifest || requestManifest()
-    earlyManifest = null
-    manifest
+    // Discover the pool, then show one entry. Loading is deferred until the
+    // manifest answers so a page load without entries shows only the gradient.
+    //
+    // A preview names the pool it wants, because the two pools are separate
+    // directories and one name can exist in both: previewing a screensaver entry out
+    // of the boot manifest would either find nothing or find a different file.
+    var manifestUrl = previewName !== null && previewPool === 'screensaver'
+      && typeof cfg.screensaverManifest === 'string'
+      ? cfg.screensaverManifest
+      : cfg.manifest
+    fetch(manifestUrl, { cache: 'no-store' })
+      .then(function (response) { return response.ok ? response.json() : { items: [] } })
       .then(function (payload) {
         globalThis.clearTimeout(manifestWindow)
-        if (previewName === null) marks.manifest = now()
-        var published = payload && Array.isArray(payload.clips) ? payload.clips : []
-        // The pool the user curated in the settings card. Switching every clip off
-        // would leave nothing to play and therefore nothing to trigger the
+        var published = payload && Array.isArray(payload.items) ? payload.items : []
+        // The pool the user curated in the settings card. Switching every entry off
+        // would leave nothing to show and therefore nothing to trigger the
         // hand-off, so a filter that would empty the pool is dropped rather than
         // obeyed — the same fallback the Host keeps, repeated here because this
         // manifest is the only input this script has.
@@ -1093,10 +1100,10 @@
         // when a user wants to know they can skip ahead.
         if (!namespace.failed) parts.hint.textContent = HINT_SOUND
 
-        // Try clips until one really plays. A pool entry can fail for reasons
+        // Try entries until one really shows. A pool entry can fail for reasons
         // outside this plugin's control (an unsupported codec, a truncated
-        // download), and one failure must not leave the screen on a bare gradient
-        // while the pool still holds playable clips.
+        // download, a Live2D model with no adapter), and one failure must not leave
+        // the screen on a bare gradient while the pool still holds usable entries.
         var preferred
         if (previewName !== null) {
           // The named clip, looked up in the PUBLISHED list rather than the enabled
@@ -1128,28 +1135,49 @@
         setAudioBlocked(SOUND_ON ? null : 'disabled')
 
         /**
-         * Start a clip. Sound first, muted only as the fallback.
+         * Start an entry. Sound first, muted only as the fallback.
          *
          * Chromium permits sound only with a user gesture, but it also counts
          * prior interaction with the origin (sticky activation) and its own media
-         * engagement record, so an unmuted play() genuinely succeeds on a
-         * regularly used origin. Trying muted first, as this screen used to, threw
-         * that away: it silenced the clip on every machine, including the ones
-         * where sound was already allowed.
-         * @param video - the element to start.
+         * engagement record, so an unmuted start genuinely succeeds on a regularly
+         * used origin. Trying muted first, as this screen used to, threw that away:
+         * it silenced the clip on every machine, including the ones where sound was
+         * already allowed.
+         *
+         * A renderer with no audio path (an image, a model) has no `mute` method,
+         * so the whole audio negotiation collapses to "start it once" — there is
+         * nothing to try unmuted, nothing to fall back from, and no button to tell.
+         * That is the same code path, not a special case.
+         * @param media - the renderer to start.
          * @param onPlaying - called once frames are flowing.
-         * @param onBlocked - called when neither unmuted nor muted playback starts.
+         * @param onBlocked - called when nothing could be started.
          */
-        function startClip(video, onPlaying, onBlocked) {
+        function startClip(media, onPlaying, onBlocked) {
           var decided = false
           var settle = function (fn) { return function () { if (decided) return; decided = true; fn() } }
           var playing = settle(onPlaying)
           var blocked = settle(onBlocked)
+
+          if (typeof media.mute !== 'function') {
+            // No audio path at all. One start attempt, and a refusal is a real
+            // failure rather than an audio-policy one, so it goes to onBlocked.
+            var only
+            try {
+              only = media.start()
+            } catch (error) {
+              blocked()
+              return
+            }
+            if (only && typeof only.then === 'function') only.then(playing, blocked)
+            else playing()
+            return
+          }
+
           var attemptPlay = function (muted, onRefused) {
-            video.muted = muted
+            media.mute(muted)
             var played
             try {
-              played = video.play()
+              played = media.start()
             } catch (error) {
               onRefused()
               return
@@ -1169,19 +1197,14 @@
             }
             started()
           }
-          // Set once the 1200 ms window has handed the start to the muted fallback.
-          // The unmuted promise can still settle after that, and its outcome would
-          // then describe a state the element is no longer in.
-          var preempted = false
           var fallback = function () {
-            preempted = true
             setAudioBlocked('refused')
             audioRetry = function () {
               attemptPlay(false, function () {
                 // Refused again, this time with a gesture behind it: the clip is
                 // silent, so the element goes back to muted and the button goes
                 // back to saying so instead of promising sound that is not there.
-                video.muted = true
+                media.mute(true)
                 setAudioBlocked('refused', SOUND_HINT_REFUSED)
               })
             }
@@ -1206,30 +1229,12 @@
           // This attempt resolved unmuted: the clip is audible, and this is the one
           // fact the button is drawn from, so it is written before the reveal
           // callback gets to say anything about the clip.
-          //
-          // Only while it is still the attempt in charge: a resolve arriving after
-          // `fallback` has muted the element would claim the clip is audible, and
-          // `audioBlocked` is what press() reads to choose between unlocking the
-          // sound and leaving — a late write turns the two-step press into a
-          // one-step exit. `video.muted` is checked too, because the retry path and
-          // the user's own toggle write it as well.
-          var unmutedPlaying = function () {
-            settleWindow()
-            if (preempted || video.muted) return
-            setAudioBlocked(null)
-            playing()
-          }
-          // The same window, from the other side: a refusal that arrives after the
-          // fallback has run would start the muted attempt a SECOND time.
-          var unmutedRefused = function () {
-            settleWindow()
-            if (preempted) return
-            fallback()
-          }
-          video.muted = false
+          var unmutedPlaying = function () { settleWindow(); setAudioBlocked(null); playing() }
+          var unmutedRefused = function () { settleWindow(); fallback() }
+          media.mute(false)
           var played
           try {
-            played = video.play()
+            played = media.start()
           } catch (error) {
             played = undefined
           }
@@ -1247,32 +1252,6 @@
         var noteFailure = function (clip, reason) {
           failures.push(clip.name + '(' + reason + ')')
           namespace.failures = failures.join(' ')
-        }
-
-        // The bound the first-frame watchdogs could not be: once the picture is up,
-        // `advance` is disarmed and nothing else in this closure can release the
-        // screen except the clip's own `ended`. Armed at reveal, stopped by
-        // `enter()`, by `ended`, by `error`, and by the pool running dry.
-        //
-        // It hands the screen over rather than calling tryNext(). tryNext() returns
-        // early once `settled` is set — and reveal() does too — so a replacement
-        // clip would play behind an opacity of 0, which is the freeze we are here to
-        // avoid rather than the cure. For a screen that is only decoration the
-        // choice is between showing the app and showing a stopped frame.
-        //
-        // Not armed in click mode: there the press is the release, by design, and a
-        // clip that is merely buffering must not take that decision away.
-        var armStallWatch = function (video, clip) {
-          stopStallWatch()
-          if (ENTER_MODE === 'click') return
-          lastProgress = Date.now()
-          stallWatch = globalThis.setInterval(function () {
-            if (clipDone || video.ended) { stopStallWatch(); return }
-            if (Date.now() - lastProgress < STALL_LIMIT_MS) return
-            stopStallWatch()
-            noteFailure(clip, 'stalled')
-            enter()
-          }, 1000)
         }
 
         var tryNext = function () {
@@ -1295,41 +1274,63 @@
           attempt += 1
           cache.current = clip
 
-          // A fresh element per attempt: a failed source leaves an element in an
+          // A fresh renderer per attempt: a failed source leaves an element in an
           // error state that a later load on the same element does not clear.
-          var video = document.createElement('video')
-          var current = parts.video()
-          video.className = current.className
-          // See the note in build(): a looping clip never reports its own end,
-          // and the end of the clip is what triggers the hand-off.
-          video.loop = ENTER_MODE === 'click'
-          video.playsInline = true
-          video.setAttribute('playsinline', '')
-          video.preload = 'auto'
-          if (current.parentNode) current.parentNode.replaceChild(video, current)
-          parts.replaceVideo(video)
+          //
+          // `kind` decides everything about how this entry behaves — whether it
+          // has a timeline, whether it can make a sound, whether it ends at all —
+          // and the screen never inspects the kind itself. That is the whole point
+          // of the factory: a still image and a Live2D model reach this same code
+          // and simply lack the methods that would have made them behave like a
+          // clip.
+          if (makeRenderer === null) {
+            noteFailure(clip, 'no-renderers')
+            tryNext()
+            return
+          }
+          var media = makeRenderer(clip, {
+            // The intro does NOT loop, and that is load-bearing rather than a
+            // default: the entry's own end is what releases the hand-off, and a
+            // looping element never fires `ended`, so a looping intro would hold
+            // the screen until the user pressed something.
+            //
+            // `click` mode is the exception, and it is the mode's whole meaning:
+            // there the clip is the show and only a press ends it, so it is given
+            // the loop it needs to keep playing until that press.
+            loop: ENTER_MODE === 'click',
+            onDiagnostic: function (reason) { noteFailure(clip, reason) },
+          })
+          if (media === undefined || media === null) {
+            // An unknown kind is a pool entry this build cannot show. Say which
+            // one rather than skipping it silently.
+            noteFailure(clip, 'kind:' + String(clip.kind))
+            tryNext()
+            return
+          }
+          parts.place(parts.intro, media)
+          parts.setMedia(media)
+          var el = media.el()
 
           var advance = globalThis.setTimeout(function () {
-            // The clip was given its six seconds and never showed anything. Say so
+            // The entry was given its six seconds and never showed anything. Say so
             // before moving on: "skipped silently" is indistinguishable from "the
             // whole screen is broken" when all you can see is a gradient.
             noteFailure(clip, 'no-frame')
             tryNext()
           }, 6000)
-          // Armed only for a clip whose duration cannot be known; see below.
+          // Armed only for an entry whose duration cannot be known; see below.
           var endless = null
           var reveal = function () {
             if (settled) return
             settled = true
             globalThis.clearTimeout(advance)
-            armStallWatch(video, clip)
-            if (previewName === null && marks.frame === null) marks.frame = now()
             // The fade is driven by an inline style rather than a CSS rule: an
             // inline value cannot lose a specificity contest with anything else on
             // the page. Written only once a frame has actually been presented —
-            // see whenFramePresents for why a resolved play() is not that moment.
-            video.style.opacity = '1'
-            video.setAttribute('data-shown', '1')
+            // which is a fact the renderer reports, because a resolved play() is
+            // not that moment.
+            el.style.opacity = '1'
+            el.setAttribute('data-shown', '1')
             // Only while the clip is still the thing being watched. Once it has
             // ended, the hint belongs to the hand-off — a late frame arriving after
             // the end must not overwrite "waiting for the kernel to be ready".
@@ -1340,71 +1341,66 @@
             }
           }
           // The watchdog above stays armed until this fires. That is the whole
-          // point: a clip that starts but never paints must be skipped, not
+          // point: an entry that starts but never paints must be skipped, not
           // waited on — and it says which one it was.
-          whenFramePresents(video, reveal)
-          video.addEventListener('error', function () {
-            globalThis.clearTimeout(advance)
-            globalThis.clearTimeout(endless)
-            stopStallWatch()
-            var code = video.error ? video.error.code : 0
-            noteFailure(clip, 'err' + String(code))
-            tryNext()
-          }, { once: true })
+          if (typeof media.onShown === 'function') media.onShown(reveal)
 
-          // The clip's own end is the hand-off signal, and it works for any
-          // length: a 8-second clip and a 15-second clip each fire this when they
+          if (typeof media.onError === 'function') {
+            media.onError(function (code) {
+              globalThis.clearTimeout(advance)
+              globalThis.clearTimeout(endless)
+              noteFailure(clip, 'err' + String(code))
+              tryNext()
+            })
+          }
+
+          // The entry's own end is the hand-off signal, and it works for any
+          // length: an 8-second clip and a 15-second clip each fire this when they
           // are done, so nothing here has to know or care how long the clip is.
-          video.addEventListener('ended', function () {
-            globalThis.clearTimeout(endless)
-            stopStallWatch()
-            namespace.clipEndedAt = Date.now()
-            clipDone = true
-            maybeEnter()
-          }, { once: true })
+          //
+          // A renderer with no `onEnded` never finishes — a still image, an
+          // animated image, a Live2D model — so it is bounded by the ENDLESS timer
+          // below instead. That is the documented rule that every dead end on the
+          // boot path has a bound, and it is why nothing here needs a branch for
+          // "this kind cannot end": the unknown-length path already means that.
+          if (typeof media.onEnded === 'function') {
+            media.onEnded(function () {
+              globalThis.clearTimeout(endless)
+              namespace.clipEndedAt = Date.now()
+              clipDone = true
+              maybeEnter()
+            })
+          }
 
-          // ...but a clip whose length is unknown never reports an end at all.
-          // `duration` is Infinity for a MediaRecorder WebM, and `ended` on such
-          // an element may never fire, so an unbounded wait would hold the screen
-          // indefinitely. This is the only fallback for that case, and it is
-          // armed only when the duration is genuinely unknowable.
-          video.addEventListener('loadedmetadata', function () {
-            if (Number.isFinite(video.duration)) return
+          // A stall is the difference between "the clip ended" and "the clip is
+          // waiting for bytes". Recording it is what makes a freeze reportable
+          // instead of guessed at, and the diagnostic line prints it.
+          if (typeof media.onStall === 'function') {
+            media.onStall(function () { namespace.lastStall = Date.now() })
+          }
+
+          // The bound for everything without a timeline.
+          //
+          // A clip whose length is unknown never reports an end at all: `duration`
+          // is Infinity for a MediaRecorder WebM, and `ended` on such an element
+          // may never fire. An image, an animated image and a Live2D model have no
+          // duration to report in the first place, so they land here by the same
+          // rule rather than by a rule of their own.
+          var knownLength = typeof media.duration === 'function' && Number.isFinite(media.duration())
+          if (!knownLength) {
             namespace.unknownLength = true
             endless = globalThis.setTimeout(function () {
               clipDone = true
               maybeEnter()
             }, ENDLESS_MS)
-          }, { once: true })
-          // The heartbeat the stall watchdog reads. Deliberately NOT bumped by
-          // `stalled` / `waiting` below: those events are the clock stopping, and
-          // treating them as progress would disarm the very thing watching for it.
-          video.addEventListener('timeupdate', function () {
-            lastProgress = Date.now()
-          })
-          video.addEventListener('playing', function () {
-            lastProgress = Date.now()
-          })
+          }
 
-          // A stall is the difference between "the clip ended" and "the clip is
-          // waiting for bytes". Recording it is what makes a freeze reportable
-          // instead of guessed at, and the diagnostic line prints it.
-          video.addEventListener('stalled', function () {
-            namespace.lastStall = Date.now()
-          })
-          video.addEventListener('waiting', function () {
-            namespace.lastStall = Date.now()
-          })
-
-          video.src = clip.src
-          if (previewName === null && marks.src === null) marks.src = now()
-
-          startClip(video, function () {
+          startClip(media, function () {
             // Playback started. Deliberately does NOT reveal: leaving the paused
             // state is not the same fact as having a frame to show, and revealing
             // here is what used to disarm the watchdog before any picture existed.
           }, function () {
-            // Neither unmuted nor muted playback started: move to the next clip.
+            // Neither unmuted nor muted playback started: move to the next entry.
             globalThis.clearTimeout(advance)
             globalThis.clearTimeout(endless)
             tryNext()
@@ -1424,21 +1420,28 @@
           // property being bought here.
           var tailEntered = false
           namespace.tailEntered = false
+          // Only a renderer with a real timeline can be dissolved against its own
+          // clock. An image or a model has no duration and no currentTime, so the
+          // whole loop is skipped for it — and the entry is instead released by the
+          // ENDLESS bound, which is the correct shape for something with no end.
+          var hasTimeline = typeof media.duration === 'function' && typeof media.currentTime === 'function'
           var tailCheck = function () {
             if (tailEntered || !settled) return
-            if (parts.video() !== video) return
+            if (parts.media() !== media) return
             if (parts.root.getAttribute('data-state') === 'leaving') { tailEntered = true; return }
             // An unknown length is the ENDLESS timer's problem, not this one.
-            if (!Number.isFinite(video.duration)) return
+            var duration = media.duration()
+            if (!Number.isFinite(duration)) return
             // Too short to carry the dissolve: it would have to start before the
             // picture is even up. Those play out and fade afterwards instead.
-            if (video.duration * 1000 < TAIL_MIN_MS) return
-            if (video.ended || video.paused) return
+            if (duration * 1000 < TAIL_MIN_MS) return
+            if (typeof media.isEnded === 'function' && media.isEnded()) return
+            if (typeof media.isPaused === 'function' && media.isPaused()) return
             // The dissolve is the moment the app becomes visible, so it may only
             // start once the app can actually be shown. A slow kernel simply keeps
             // the clip playing past its end; `maybeEnter` takes over from there.
             if (namespace.bootedAt === null) return
-            var remaining = (video.duration - video.currentTime) * 1000
+            var remaining = (duration - media.currentTime()) * 1000
             if (remaining > FADE_MS || remaining <= 0) return
             tailEntered = true
             namespace.tailEntered = true
@@ -1446,17 +1449,17 @@
           }
           var tailFrame = function () {
             tailCheck()
-            if (!tailEntered && parts.video() === video) nextFrame(tailFrame)
+            if (!tailEntered && parts.media() === media) nextFrame(tailFrame)
           }
           // Only `tail` mode dissolves against the clip's own clock. The other two
           // have nothing to aim at, so the loop is never started at all rather
           // than started and immediately declined.
-          if (ENTER_MODE === 'tail') {
+          if (ENTER_MODE === 'tail' && hasTimeline) {
             nudgeTail = tailCheck
             nextFrame(tailFrame)
             // The backstop for the state rAF cannot cover: a background tab
             // throttles frames, and media time keeps moving while they are gone.
-            video.addEventListener('timeupdate', tailCheck)
+            media.el().addEventListener('timeupdate', tailCheck)
           }
         }
 
@@ -1465,77 +1468,6 @@
       .catch(function () { /* an unreachable pool leaves the gradient */ })
   }
 
-  /**
-   * Run `fn` once the kernel boot page exists.
-   *
-   * The overlay now mounts before the shell module has run, so the boot page it
-   * reads progress and failure from is usually not there yet. It is created inside
-   * the document body, so a childList watch on the body sees it arrive.
-   * @param fn - called once, with the boot page in the document.
-   */
-  function whenKernelPage(fn) {
-    if (document.querySelector('[data-dsh-boot]') !== null || typeof MutationObserver !== 'function') {
-      fn()
-      return
-    }
-    var watch = new MutationObserver(function () {
-      if (document.querySelector('[data-dsh-boot]') === null) return
-      watch.disconnect()
-      fn()
-    })
-    watch.observe(document.body || document.documentElement, { childList: true, subtree: true })
-  }
-
-  /**
-   * Put the overlay back if the page drops it before the exit.
-   *
-   * Mounting this early means the overlay is in the body while the shell builds
-   * its own boot page and the app. Nothing there is known to clear the body, but
-   * if anything ever does, the cost would be the kernel page flashing through
-   * with no way back — so the overlay is re-appended until it has started leaving.
-   */
-  function keepAttached() {
-    if (typeof MutationObserver !== 'function' || !document.body) return
-    var root = parts.root
-    var guard = new MutationObserver(function () {
-      if (parts.root !== root || root.getAttribute('data-state') === 'leaving') {
-        guard.disconnect()
-        return
-      }
-      if (!root.isConnected && document.body) document.body.appendChild(root)
-    })
-    guard.observe(document.body, { childList: true })
-  }
-
-  /**
-   * Run `fn` as soon as `document.body` exists.
-   *
-   * This used to wait for DOMContentLoaded, which fires only after the deferred
-   * shell module has been fetched and has run — and that module is what draws the
-   * kernel boot page. So the kernel page showed first, and only then did this
-   * screen mount and begin loading its clip. The parser creates the body element
-   * right after this head-placed script, well before any module runs; that is the
-   * moment.
-   *
-   * No tag may be spelled out anywhere in this file, comments included: the Host
-   * splices its rows into the index by finding the first body tag in the TEXT, and
-   * one written in a comment here cut this script in two and printed the rest on
-   * the page. verify-options.mjs refuses the file if one comes back.
-   * @param fn - called once, with `document.body` present.
-   */
-  function whenBody(fn) {
-    var done = false
-    var go = function () {
-      if (done || !document.body) return
-      done = true
-      if (watch) watch.disconnect()
-      fn()
-    }
-    var watch = typeof MutationObserver === 'function' ? new MutationObserver(go) : null
-    if (watch) watch.observe(document.documentElement, { childList: true })
-    document.addEventListener('DOMContentLoaded', go, { once: true })
-  }
-
   if (document.body) mount()
-  else whenBody(mount)
+  else document.addEventListener('DOMContentLoaded', mount, { once: true })
 })()

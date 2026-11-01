@@ -20,10 +20,41 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
+================================================================================
+MEDIA ASSETS ARE NOT PART OF THE MIT GRANT
+================================================================================
 
-## The video clips in `assets/videos/`
+The MIT permission above covers the SOFTWARE — the code and its documentation.
 
-The three `.mp4` files are the author's own animation work and are distributed
-under the same MIT terms as the code. Replace them with your own footage if you
-prefer — the plugin discovers whatever is in that directory. See MANUAL.md.
+It does NOT cover the media assets. The video clips in `assets/videos/` and
+`assets/screensaver/` are the author's own original animation artwork. All rights
+to them are reserved by the author.
+
+What you MAY do with the media assets:
+
+  - Use them as they are, inside this plugin, for personal and non-commercial use.
+  - Keep them in place when you fork the repository, so the plugin still works
+    out of the box for you and for anyone else using it non-commercially.
+  - Replace or delete them — the plugin discovers whatever is in those
+    directories, and an empty pool is a legitimate state (the screen falls back
+    to its own background).
+
+What you MAY NOT do with the media assets:
+
+  - Sell them, license them, or otherwise transfer them for money.
+  - Use them commercially, in whole or in part, in any product or service.
+  - Extract them and redistribute them as standalone artwork, a stock library,
+    a background/wallpaper pack, or as content for a generative model.
+  - Claim authorship of them.
+
+If you want to use these clips commercially, or ship them inside a commercial
+product, you need the author's explicit written permission. Without it, remove
+the media assets from your copy and supply your own footage.
+
+The plugin icons in `assets/icon/` (`icon-40.png`, `icon-80.png`, `icon-160.png`)
+are NOT covered by this reservation — they are part of the SOFTWARE and follow
+the MIT terms above.
+
+Nothing here restricts the SOFTWARE's MIT grant: you can still use, modify,
+sublicense and sell the code itself. The reservation applies to the media files
+only, and only those files.

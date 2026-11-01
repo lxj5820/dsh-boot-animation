@@ -1,5 +1,23 @@
+# Dependencies
 node_modules/
+
+# Runtime output
 *.log
+
+# OS noise
 .DS_Store
 Thumbs.db
+
+# Pre-rewrite originals. The pools ignore these (they list regular files only),
+# so carrying them would put the same bytes in history twice.
 assets/videos/originals/
+assets/screensaver/originals/
+
+# Staging directories the suites and the in-process rewrite create and remove
+.verify-pools/
+.faststart-work/
+
+# Local screenshots and hand-made backups
+.shots/
+*.bak
+*.bak-*
