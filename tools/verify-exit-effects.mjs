@@ -390,9 +390,9 @@ record('the dismissal prefers an explicit style, then the preview one, then the 
  * Same three-list contract as the exit effects: a name in one list and not the others means the
  * card writes a value the Host rejects, which falls back to 不显示 in silence.
  */
-const POINTER = ['none', 'random', 'ripples', 'attract', 'lens']
+const POINTER = ['none', 'random', 'ripples', 'attract']
 record('entry.js declares the pointer styles',
-  /const POINTER_EFFECTS = \['none', 'random', 'ripples', 'attract', 'lens'\]/.test(entry))
+  /const POINTER_EFFECTS = \['none', 'random', 'ripples', 'attract'\]/.test(entry))
 record('entry.js schema accepts exactly those',
   POINTER.every(v => entry.includes("z.const('" + v + "')")),
   POINTER.filter(v => !entry.includes("z.const('" + v + "')")).join(','))
@@ -400,13 +400,20 @@ record('entry.js validates an unknown pointer style to the default',
   /POINTER_EFFECTS\.includes\(screensaverPointerEffect\)/.test(entry))
 record('entry.js forwards the pointer style', /screensaverPointerEffect: settings\.screensaverPointerEffect/.test(entry))
 
-/* ---- the card offers THREE, and the schema still accepts the retired two ----
+/* ---- the card offers the two that WORK, and 菱形涟漪 is deleted outright ----
  *
- * 菱形涟漪 (lens) and 随机 were retired from the picker by request. The distinction matters:
- *   - the CARD must not offer them any more, and must not render an empty picker for a profile
- *     that still stores one;
- *   - the SCHEMA and the screensaver must still ACCEPT them, because the stored value lives in
- *     the profile and an enum that dropped a member would reject the whole config document.
+ * The picker was hidden for a while, because the decoration could not be made reliable: the
+ * first rAF tick could carry a NEGATIVE dt (-0.038ms measured), which produced a negative ring
+ * radius and made `arc()` throw, so the loop died on frame one and painted nothing. With dt
+ * clamped, every shipped effect was re-measured in a real browser, and 菱形涟漪 still read as an
+ * evenly-lit smear over real artwork. So:
+ *
+ *   - the PICKER now offers the two effects that measurably paint;
+ *   - 菱形涟漪 (`lens`) is DELETED — implementation, schema member, mark and all — rather than
+ *     left hidden. Hiding it is exactly what let a stale profile value keep drawing an effect the
+ *     card had no way to turn off;
+ *   - `random` stays in the SCHEMA but not in the picker, because it is a value an existing
+ *     profile may hold and an enum that dropped it would reject the whole config document.
  */
 const OFFERED = ['none', 'ripples', 'attract']
 // The check has to look INSIDE the pointer block: `['random',` also appears in the EXIT style
@@ -414,31 +421,22 @@ const OFFERED = ['none', 'ripples', 'attract']
 const pointerBlock = client.slice(
   client.indexOf('const POINTER_EFFECT_CHOICES'),
   client.indexOf('const POINTER_EFFECT_NAMES'))
-record('the card offers exactly the three kept styles',
+record('the card offers exactly the two working styles',
   pointerBlock.length > 0
   && OFFERED.every(v => pointerBlock.includes("['" + v + "',"))
   && !pointerBlock.includes("['lens',") && !pointerBlock.includes("['random',"),
   pointerBlock.length === 0
     ? 'POINTER_EFFECT_CHOICES not found'
     : 'the card still offers a retired style, or dropped a kept one')
-// THE USAGE SITE IS GONE, AND THAT IS CORRECT.
-//
-// This assertion used to read:
-//
-//     record('the card checks the stored value against the OFFERED list',
-//       /POINTER_EFFECT_NAMES\.includes\(stored\.screensaverPointerEffect\)/.test(client))
-//
-// It matched the USE of `POINTER_EFFECT_NAMES` inside `saverPointer`, and `saverPointer` was
-// a dead local (zero readers) that the pointer picker's removal was supposed to take with it:
-// the picker is HIDDEN by request, because the decoration could not be made reliable in the
-// desktop shell. So the old assertion demanded that a deleted dead variable still exist — it
-// went red precisely when the correct change landed.
-//
-// What the old assertion actually WANTED to guard is drift: the card must not offer a name the
-// Host's whitelist does not accept, and must not offer a name the schema would reject. That is
-// kept below, in a form that survives the picker being hidden — the DECLARATION is checked, and
-// its contents are compared against `entry.js`'s `POINTER_EFFECTS`. The removal of the picker is
-// also asserted, so nobody mistakes "the picker is gone" for a regression and puts it back.
+// The usage site has to exist again: the picker is rendered, so the selected value must be
+// computed from what the card offers rather than read straight out of the document.
+record('the card derives the selected pointer style from its own choices',
+  /const saverPointer = POINTER_EFFECT_CHOICES\.some/.test(stripComments(client)),
+  'saverPointer no longer validates the stored value against the offered list')
+record('the card RENDERS the pointer picker',
+  /POINTER_EFFECT_CHOICES\.map\(entry => tile\(/.test(stripComments(client)),
+  'the picker is declared but never rendered — that is the hidden state this change undid')
+
 const pointerNames = (client.match(/const POINTER_EFFECT_NAMES = POINTER_EFFECT_CHOICES\.map\(entry => entry\[0\]\)/) || [])[0] || ''
 const pointerChoiceNames = [...pointerBlock.matchAll(/\[(?:'([a-z]+)')/g)].map((match) => match[1])
 const hostPointerNames = (entry.match(/const POINTER_EFFECTS = \[([^\]]*)\]/) || [])[1] || ''
@@ -447,30 +445,35 @@ const hostPointerList = [...hostPointerNames.matchAll(/'([a-z]+)'/g)].map((match
 record('the card still declares POINTER_EFFECT_NAMES, derived from its choices',
   pointerNames !== '',
   pointerNames || 'POINTER_EFFECT_NAMES declaration not found')
-record('the card offers exactly the three kept names, none of the retired two',
+record('the card offers exactly the two working names',
   JSON.stringify(pointerChoiceNames) === JSON.stringify(OFFERED),
   'choices=' + (pointerChoiceNames.join(',') || '(none)'))
-// The drift guard the old assertion was reaching for: every name the card can offer must be a
-// member of the Host's whitelist. A card-only name is a value the schema rejects on save.
+// The drift guard: every name the card can offer must be a member of the Host's whitelist. A
+// card-only name is a value the schema rejects on save.
 record('every name the card can offer is accepted by the Host whitelist',
   pointerChoiceNames.length > 0 && pointerChoiceNames.every((name) => hostPointerList.includes(name)),
   'card=' + pointerChoiceNames.join(',') + ' host=' + hostPointerList.join(','))
-record('the Host whitelist keeps the retired names, so an old profile still validates',
-  ['lens', 'random'].every((name) => hostPointerList.includes(name)),
+// `random` SURVIVES in the Host list even though the card does not offer it: it is a value an
+// existing profile may already hold, and dropping it from the enum would reject that profile's
+// whole config document.
+record('the Host whitelist keeps 随机, so an old profile still validates',
+  hostPointerList.includes('random'),
   hostPointerList.join(','))
-// The picker's absence is DELIBERATE, and this pins the reason so a later reader does not
-// restore it believing it was dropped by accident. Either the dead local is still gone (the
-// code change) or the note explaining the removal is still there (the intent) — both must hold.
-record('the pointer picker is hidden by request, not by accident',
-  !/saverPointer\b/.test(stripComments(client)) && /picker is HIDDEN|HIDDEN, by request/.test(client),
-  /saverPointer\b/.test(stripComments(client))
-    ? 'saverPointer is back: the dead local the removal was meant to delete'
-    : 'the note explaining why the picker is hidden has been deleted')
+// 菱形涟漪 is GONE from every list — this is the assertion that makes the deletion stick.
+record('菱形涟漪 is deleted from the Host whitelist, the schema and the card',
+  !hostPointerList.includes('lens')
+  && !entry.includes("z.const('lens')")
+  && !pointerChoiceNames.includes('lens')
+  && !/tickLens|LENS_RADIUS|captureSource/.test(saver),
+  'something still references lens')
 record('the schema still accepts the retired names',
   POINTER.every(v => entry.includes("z.const('" + v + "')")),
   'dropping a member from the enum would reject the stored config document')
-record('the screensaver still implements every named effect',
-  ['tickRipples', 'tickAttract', 'tickLens'].every(f => saver.includes('const ' + f)))
+record('the screensaver implements every effect the card can offer',
+  ['tickRipples', 'tickAttract'].every(f => saver.includes('const ' + f)))
+record('the screensaver no longer implements 菱形涟漪',
+  !/tickLens|LENS_RADIUS|captureSource/.test(saver),
+  'a deleted effect is still in the source: a profile value could still reach it')
 record('the screensaver resolves the style by name', /function pointerEffect\(\)/.test(saver))
 
 /* ---- THE HANDOFF ITSELF: the caller passes it, and installScreensaver KEEPS it ----
@@ -524,31 +527,21 @@ record('the defaults carry both pickers',
   /breakStyle:\s*'random'/.test(bodyOf(saver, 'var DEFAULTS = {'))
   && /pointerEffect:\s*'none'/.test(bodyOf(saver, 'var DEFAULTS = {')),
   'config would be incomplete on the defaults route')
-record('the lens keeps the radius the user picked', /LENS_RADIUS = 170/.test(saver),
-  'the lens disc changed size')
-// The lens has been rewritten twice, both times from "why does this look so bad":
-//   v1 tiled the disc with 30px cells — a mosaic of little squares;
-//   v2 drew concentric rings — no grid, but a static grey magnifier, which on a dark picture is
-//      just a smudge;
-//   v3 (current) DISPLACES the picture radially with a travelling wave, so it reads as water.
-// The assertions follow v3, and they pin the two things that decide whether it looks like water
-// or like broken glass: a patch size small relative to the amplitude, and a soft radial mask
-// instead of a hard circular clip.
-record('the lens displaces radially instead of magnifying',
-  /Math\.hypot\(dx, dy\)/.test(saver) && /const sx = px - nx \* amp/.test(saver),
-  'the ripple is not a radial displacement')
-record('the lens patch is small relative to the wave amplitude',
-  /const PATCH = 4 \* dpr/.test(saver) && /const amp = 16 \* dpr/.test(saver),
-  'a patch close to the amplitude steps visibly, which is the mosaic that was reported')
-record('the lens wave travels outward with time',
-  /Math\.sin\(dist \* 0\.052 - t \* 4\.4\)/.test(saver),
-  'a static wave reads as a frozen distortion')
-record('the lens edge is a soft radial mask, not a hard clip',
-  /destination-in/.test(saver) && !/ctx\.arc\(cx, cy, R, 0, Math\.PI \* 2\)\s*\n\s*ctx\.clip\(\)/.test(saver),
-  'a hard clip is what made the old version look like a disc stuck on the picture')
-record('the lens no longer tiles cells or draws rings',
-  !/LENS_CELL/.test(saver) && !/RING_STEP/.test(saver),
-  'the old mosaic / magnifier implementation is still in the file')
+// 菱形涟漪 HAD A BLOCK OF SEVEN ASSERTIONS HERE, and they have been replaced by one.
+//
+// They pinned the v3 internals of the lens — LENS_RADIUS, the radial displacement formula, the
+// 4px patch against a 16px amplitude, the travelling sine, the `destination-in` mask. Those were
+// the right assertions while the effect shipped; two rewrites and a real-browser measurement later
+// it still read as an evenly-lit smear over real artwork, so the effect was DELETED by request.
+// Keeping the seven would have demanded that deleted code still exist, which is the same
+// mistake the old "the pointer picker is hidden" assertion made in the other direction.
+//
+// What matters now is that the deletion is COMPLETE — an implementation left behind is a code
+// path a stale profile value can still reach, and that is precisely how 菱形涟漪 kept drawing
+// after its picker was removed.
+record('菱形涟漪 is gone from the screensaver, not merely unoffered',
+  !/tickLens|LENS_RADIUS|captureSource|state\.source/.test(stripComments(saver)),
+  'part of the deleted effect is still in src/screensaver.js')
 
 /* ---- the volume curve ----
  *
@@ -848,9 +841,9 @@ record('the interval is read from the live config, not the install-time snapshot
 record('an interval under a second is refused',
   /if \(!\(ms >= 1000\)\) return/.test(saver),
   'a hand-edited document could arm a timer that fires every frame')
-record('the lens re-takes its snapshot after a swap',
-  /state\.refreshSource[\s\S]{0,200}captureSource\(\)/.test(saver),
-  'the lens would keep displacing the discarded picture')
+// ("the lens re-takes its snapshot after a swap" WAS HERE. It is gone with the effect: there is
+// no snapshot any more, because 菱形涟漪 was the only thing that needed one. The rotation itself
+// is still covered above and by "a rotation must swap the media in place".)
 // The Host side has to carry the field, or the card writes something the schema rejects.
 record('entry.js declares the rotation interval and bounds it',
   /screensaverRotateMs: live\(z\.number\(\)\.min\(0\)\.max\(600000\)/.test(entry),

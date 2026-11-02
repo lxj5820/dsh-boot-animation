@@ -734,13 +734,6 @@ function rotateNow() {
   releaseMedia()
   pickAndPlace()
   crossDissolve(before)
-  // The lens displaces a SNAPSHOT of the media, and the media was just replaced. Re-taking it is
-  // the difference between a lens that shows the new picture and one showing the old one forever.
-  if (pointerArt !== null && typeof pointerArt.refreshSource === 'function') {
-    setTimeout(() => {
-      if (pointerArt !== null && typeof pointerArt.refreshSource === 'function') pointerArt.refreshSource()
-    }, 420)
-  }
 }
 
 /**
@@ -1306,20 +1299,17 @@ function pickAndPlace() {
  * pointer leaves, and tear everything down when the layer goes. `pointerArt` owns that lifecycle.
  */
 
-/** The lens radius the user chose. Not a setting: picked once, tuned on a comparison page. */
-const LENS_RADIUS = 170
-
 let pointerArt = null
 
 /**
  * Start the pointer decoration for this appearance, or do nothing.
  *
- * @param {string} which - 'ripples' | 'attract' | 'lens', already resolved from the setting.
+ * @param {string} which - 'ripples' | 'attract', already resolved from the setting.
  */
 function startPointerArt(which) {
   stopPointerArt()
   if (root === null) return
-  if (which !== 'ripples' && which !== 'attract' && which !== 'lens') return
+  if (which !== 'ripples' && which !== 'attract') return
 
   const width = root.clientWidth
   const height = root.clientHeight
@@ -1362,8 +1352,6 @@ function startPointerArt(which) {
     // Effect-specific state, built once.
     rings: [],
     dust: null,
-    source: null,
-    sourceDirty: true,
     // A running total of `stroke()` calls, so `state()` can report whether the decoration is
     // actually putting anything into the canvas. Counted here rather than inferred from the frame
     // count, because an effect can run its loop and draw nothing (an empty ring list, a zero-size
@@ -1415,27 +1403,7 @@ function startPointerArt(which) {
     document.removeEventListener('mouseleave', onLeave)
   }
 
-  /* ---- the picture, for the lens ---- */
-
-  const captureSource = () => {
-    // The lens displaces the PICTURE, so it needs a full-resolution copy of what the media is
-    // showing. Captured on demand and re-captured when a new entry is placed.
-    const element = media === null ? null : media.el()
-    if (element === null) return
-    const c = document.createElement('canvas')
-    c.width = W
-    c.height = H
-    const g = c.getContext('2d')
-    if (g === null) return
-    try {
-      g.drawImage(element, 0, 0, W, H)
-      state.source = c
-    } catch {
-      // An element that has not decoded yet throws; it is retried on the next attempt.
-    }
-  }
-
-  /* ---- the three effects ---- */
+  /* ---- the two effects ---- */
 
   /**
    * Ripples: rings spreading outward from the pointer, like a stone dropped in water.
@@ -1513,14 +1481,28 @@ function startPointerArt(which) {
     return state.rings.length > 0 || state.inside
   }
 
+  /**
+   * Star dust that gets pulled toward the pointer.
+   *
+   * WHY IT GOT LOUDER. The first version seeded 150 motes of 0.8-2.6 CSS pixels at a peaking 0.55
+   * alpha, on a 1256x628 layer — measured in a real browser that came to about 1,100 painted
+   * pixels, with an average alpha of 38/255. On actual artwork it was invisible: the same
+   * complaint 水波涟漪 had twice ("基本看不见"), and the same answer. Visibility here is DENSITY,
+   * SIZE and a halo — not a flat alpha bump, which just turns faint dots into faint brighter dots.
+   *
+   * So: 520 motes (the count the galaxy band settled on for the same reason), roughly twice the
+   * diameter, each drawn with a soft 3-step halo so a single mote covers a few pixels instead of
+   * one, and a brighter core. The 520 fillRects per frame is still nothing next to one canvas
+   * composite.
+   */
   const buildDust = () => {
-    const COUNT = 150
+    const COUNT = 520
     const dust = []
     for (let i = 0; i < COUNT; i += 1) {
       dust.push({
         x: Math.random(), y: Math.random(),
         vx: 0, vy: 0,
-        size: 0.8 + Math.random() * 1.8,
+        size: 1.6 + Math.random() * 2.4,
         phase: Math.random() * Math.PI * 2,
       })
     }
@@ -1549,141 +1531,25 @@ function startPointerArt(which) {
       d.y += d.vy * dt / H
       d.x += (Math.random() - 0.5) * 0.0004
       d.y += (Math.random() - 0.5) * 0.0004
-      const twinkle = 0.55 + 0.45 * Math.sin(now * 0.0016 + d.phase)
-      ctx.fillStyle = 'rgba(210,240,255,' + (0.55 * twinkle) + ')'
-      ctx.fillRect(d.x * W, d.y * H, d.size * dpr, d.size * dpr)
+      const twinkle = 0.6 + 0.4 * Math.sin(now * 0.0016 + d.phase)
+      const cx = d.x * W
+      const cy = d.y * H
+      const r = d.size * dpr
+      // A halo in three steps around the core: the halo is what makes a two-pixel mote readable
+      // over a bright picture, and drawing it as three cheap squares beats a radial gradient per
+      // mote by two orders of magnitude in cost.
+      ctx.fillStyle = 'rgba(150,205,255,' + (0.14 * twinkle) + ')'
+      ctx.fillRect(cx - r, cy - r, r * 3, r * 3)
+      ctx.fillStyle = 'rgba(190,230,255,' + (0.34 * twinkle) + ')'
+      ctx.fillRect(cx - r * 0.55, cy - r * 0.55, r * 2.1, r * 2.1)
+      ctx.fillStyle = 'rgba(235,248,255,' + (0.92 * twinkle) + ')'
+      ctx.fillRect(cx - r * 0.3, cy - r * 0.3, r * 1.6, r * 1.6)
     }
     ctx.globalCompositeOperation = 'source-over'
-    // The dust twinkles even at rest, so this one never parks while the layer is up. It is 150
-    // fillRects per frame — cheap enough that parking it would be the more surprising choice.
+    // The dust twinkles even at rest, so this one never parks while the layer is up.
     return true
   }
 
-  /**
-   * The lens: a WATER RIPPLE under the pointer, not a magnifier.
-   *
-   * Rewritten twice, and both rewrites came from the same report: "why does this effect look so
-   * bad". Version one tiled the disc with 30px cells, which read as a mosaic of little squares.
-   * Version two drew concentric rings, which removed the grid but made the disc a static grey
-   * haze — a magnifier, and on a dark picture a magnifier is just a smudge.
-   *
-   * What it does now is DISPLACE the picture with a travelling wave, the way a ripple on water
-   * does. The displacement is radial: every sample point is pushed a few pixels away from the
-   * pointer (or toward it), by an amount that is a sine of its distance and of time. That is the
-   * one formulation that produces rings that visibly move outward, and it needs no magnification
-   * at all — the picture keeps its scale, which is why it no longer looks like a smudge.
-   *
-   * Drawn as a grid of small source patches, and the grid size is chosen so the patches are
-   * SMALLER than the displacement: at 6 device pixels per patch a 13px wave is smooth, because
-   * neighbouring patches land at noticeably different offsets. The old version's mistake was the
-   * opposite — 30px cells with a smaller wave, which is a mosaic with steps you can count.
-   *
-   * Three things make it read as water rather than as a glitch:
-   *   - the displacement is a smooth sine of distance, so the patches form rings;
-   *   - the wave TRAVELS outward with time, so the rings move;
-   *   - the whole thing is masked by a radial falloff, so there is no hard disc edge — the old
-   *     version's "it looks like a round disc stuck on the picture".
-   *
-   * Cost is bounded by construction: the patch grid covers a fixed-radius square, not the screen,
-   * so the work does not grow with window size.
-   */
-  const tickLens = (dt, now) => {
-    if (state.source === null) {
-      captureSource()
-      if (state.source === null) { ctx.clearRect(0, 0, W, H); return false }
-    }
-    ctx.clearRect(0, 0, W, H)
-    if (state.presence < 0.02) return false
-
-    const t = now / 1000
-    const R = LENS_RADIUS * dpr
-    const cx = state.x
-    const cy = state.y
-    const alpha = state.presence
-
-    // The ripple lives in a square around the pointer, larger than the visible falloff so the
-    // wave has room to die out rather than being cut off at the mask.
-    const reach = R * 1.35
-    const left = Math.max(0, Math.floor(cx - reach))
-    const top = Math.max(0, Math.floor(cy - reach))
-    const right = Math.min(W, Math.ceil(cx + reach))
-    const bottom = Math.min(H, Math.ceil(cy + reach))
-
-    ctx.save()
-    // A radial mask, not a circular clip: the edge of the effect has to FADE. A clip gives a
-    // hard rim, which is exactly what made the previous version look like a disc laid on top.
-    const mask = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.2)
-    mask.addColorStop(0, 'rgba(0,0,0,1)')
-    mask.addColorStop(0.55, 'rgba(0,0,0,0.95)')
-    mask.addColorStop(0.85, 'rgba(0,0,0,0.45)')
-    mask.addColorStop(1, 'rgba(0,0,0,0)')
-
-    // The patch grid. PATCH is deliberately SMALL relative to the wave amplitude, and the wave
-    // itself is short enough that neighbouring patches land at visibly different offsets: that
-    // is what makes the displacement smooth instead of stepped. Measured on a comparison page —
-    // 4px patches with a 16px amplitude was the only combination that read as water rather than
-    // as broken glass, which is what 6px/11px produced.
-    const PATCH = 4 * dpr
-    for (let y = top; y < bottom; y += PATCH) {
-      for (let x = left; x < right; x += PATCH) {
-        const px = x + PATCH / 2
-        const py = y + PATCH / 2
-        const dx = px - cx
-        const dy = py - cy
-        const dist = Math.hypot(dx, dy)
-
-        // Nothing outside the ripple: the mask would fade it to nothing anyway, and skipping the
-        // draw is what keeps the cost proportional to the disc rather than to the window.
-        if (dist > R * 1.25) continue
-
-        // Falloff toward the edge, so a patch that is fading out also stops moving. Movement
-        // without a fade at the rim is what makes a ripple look cut out.
-        const edgeFall = Math.max(0, 1 - dist / (R * 1.1))
-        if (edgeFall <= 0.01) continue
-
-        // The wave: a sine of distance MINUS time, so crests travel outward from the pointer.
-        // The second term at a lower frequency gives the rings a slight wobble, which is what
-        // stops them looking like a mechanical bullseye.
-        const wave = Math.sin(dist * 0.052 - t * 4.4) * 0.75
-          + Math.sin(dist * 0.021 - t * 1.9) * 0.25
-        const amp = 16 * dpr * edgeFall * alpha * wave
-
-        // Radial displacement: each patch is sampled a little nearer to, or further from, the
-        // pointer. Along the direction of `dx,dy`, which is what makes the rings circular.
-        const nx = dist === 0 ? 0 : dx / dist
-        const ny = dist === 0 ? 0 : dy / dist
-        const sx = px - nx * amp
-        const sy = py - ny * amp
-
-        ctx.drawImage(state.source,
-          sx, sy, PATCH, PATCH,
-          x, y, PATCH, PATCH)
-      }
-    }
-
-    // The cool light that makes it read as water rather than as a smear: a faint blue sheen,
-    // faded out by the same radial mask.
-    ctx.globalCompositeOperation = 'lighter'
-    const sheen = ctx.createRadialGradient(cx, cy, 0, cx, cy, R)
-    sheen.addColorStop(0, 'rgba(150,210,255,' + (0.09 * alpha) + ')')
-    sheen.addColorStop(0.7, 'rgba(120,185,240,' + (0.04 * alpha) + ')')
-    sheen.addColorStop(1, 'rgba(120,185,240,0)')
-    ctx.fillStyle = sheen
-    ctx.beginPath()
-    ctx.arc(cx, cy, R, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Punch the mask out: the ripple is drawn at full strength above, and this multiplies the
-    // whole thing back down toward the edges. `destination-in` with the same gradient is what
-    // makes the boundary soft instead of a cut.
-    ctx.globalCompositeOperation = 'destination-in'
-    ctx.fillStyle = mask
-    ctx.fillRect(left, top, right - left, bottom - top)
-    ctx.globalCompositeOperation = 'source-over'
-
-    ctx.restore()
-    return true
-  }
 
   /* ---- the loop ---- */
 
@@ -1723,8 +1589,7 @@ function startPointerArt(which) {
 
     let busy = false
     if (state.which === 'ripples') busy = tickRipples(dt, now)
-    else if (state.which === 'attract') busy = tickAttract(dt)
-    else busy = tickLens(dt, now)
+    else busy = tickAttract(dt)
 
     // Parking: an effect with nothing left to draw stops the loop, and the next pointer move
     // restarts it. Without this, an idle screensaver would run a rAF loop for hours.
@@ -1749,17 +1614,7 @@ function startPointerArt(which) {
     if (state.raf !== null) globalThis.cancelAnimationFrame(state.raf)
     state.raf = null
   }
-  // The lens works from a snapshot of the media, and the rotation replaces that media underneath
-  // it. Without this the lens would keep displacing the discarded picture.
-  state.refreshSource = () => {
-    state.source = null
-    captureSource()
-  }
-
   pointerArt = state
-  // The lens needs a frame of the picture before the pointer arrives, or the first second shows
-  // nothing under the lens.
-  if (which === 'lens') setTimeout(() => { if (pointerArt === state) captureSource() }, 350)
 
   // The loop starts only when there is something for it to do.
   //
@@ -1802,9 +1657,9 @@ function pointerEffect() {
   const source = typeof CFG?.screensaverPointerEffect === 'string'
     ? CFG.screensaverPointerEffect
     : (config !== null && typeof config.pointerEffect === 'string' ? config.pointerEffect : 'none')
-  if (source === 'ripples' || source === 'attract' || source === 'lens') return source
+  if (source === 'ripples' || source === 'attract') return source
   if (source === 'random') {
-    const options = ['ripples', 'attract', 'lens']
+    const options = ['ripples', 'attract']
     return options[Math.floor(Math.random() * options.length)]
   }
   return null
