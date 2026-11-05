@@ -7,7 +7,7 @@
 | **启动动画** | 打开页面时用一段全屏短片盖住 DSH 的启动页，片尾交叉溶解进界面。 |
 | **屏保** | 闲置一段时间后用全屏层盖住界面，点一下或按任意键收回，退出时播特效。 |
 
-<img src="https://kingofsoysauce.github.io/dsh-skin-market/skin-screenshots/lxj5820__dsh-boot-animation/b7786cd749ef18608340a8f5e2071a3656ebf009/home.gif" width="720" alt="dsh-boot-animation">
+<img src="assets/preview.gif" width="720" alt="dsh-boot-animation">
 
 ## 特性
 
