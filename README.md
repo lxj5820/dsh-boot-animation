@@ -7,6 +7,8 @@
 | **启动动画** | 打开页面时用一段全屏短片盖住 DSH 的启动页，片尾交叉溶解进界面。 |
 | **屏保** | 闲置一段时间后用全屏层盖住界面，点一下或按任意键收回，退出时播特效。 |
 
+<img src="assets/preview.gif" width="720" alt="dsh-boot-animation">
+
 ## 特性
 
 - 素材按扩展名支持四类：视频（`.mp4` `.m4v` `.webm` `.mov`）、静态图（`.png` `.jpg` `.jpeg` `.avif`）、动图（`.gif` `.webp`）、Live2D 模型（含 `.model3.json` 的文件夹）。`.svg` 与 `.mkv` 一律忽略。
