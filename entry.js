@@ -460,6 +460,12 @@ export const Config = z.object({
     z.const('random').description('随机'),
     z.const('ripples').description('水波涟漪'),
     z.const('attract').description('星屑吸附'),
+    // 菱形涟漪 is RETIRED, but the name stays in the schema on purpose. schemastery's
+    // `.default()` only covers `undefined`: a stored `lens` that is missing from this union makes
+    // `union()` THROW, and the throw rejects that profile's whole config document instead of
+    // falling back. `lens` is absent from POINTER_EFFECTS below, so `readField` normalises it to
+    // `none` and nothing ever draws it — the schema only has to keep ACCEPTING the old value.
+    z.const('lens').description('菱形涟漪（已停用，仅为旧 profile 保留解析兼容）'),
   ]).default(DEFAULT_SETTINGS.screensaverPointerEffect)),
   disabledScreensaver: live(z.array(z.string()).default([])),
   // Whether the screensaver's media may make a sound. OFF by default: this layer covers the

@@ -139,9 +139,6 @@ const MARK = {
   ripples: [[4, 4], [7, 7], [10, 10], [7, 7], [4, 4]],
   // Attract: a narrow column widening toward the middle, i.e. drawn inward.
   attract: [[2, 2], [3, 5], [4, 8], [3, 5], [2, 2]],
-  // Lens: RETIRED with the effect itself. Kept only because `verify-exit-effects.mjs` reads these
-  // declarations as its anchor for "the card offers no retired style"; nothing renders it.
-  lens: [[5, 5], [5, 9], [5, 5]],
   // Particles: a left-heavy scatter.
   particles: [[6, 6], [4, 4], [3, 3], [2, 2]],
   // Fall: stacked blocks, the lowest and largest last.
@@ -176,11 +173,14 @@ const MARK = {
  *      it would turn two assertions red for a change that is about dead code, which is the wrong
  *      kind of green.
  *   2. Restoring the picker is the one-line change the hidden note promises. This table plus the
- *      `MARK.ripples` / `MARK.attract` / `MARK.lens` marks are exactly what that line needs.
+ *      `MARK.ripples` / `MARK.attract` marks are exactly what that line needs.
  *
- * The retired names (lens, random) stay in the schema and in src/screensaver.js, so a profile that
- * still stores one keeps working; they are absent from this table because the card no longer offers
- * a choice the user asked to retire.
+ * The retired names stay only where they still have a job: `random` is in the schema, in the Host
+ * whitelist and in `pointerEffect()` (a stored 随机 keeps picking); `lens` is in the SCHEMA ALONE —
+ * its implementation is gone, and both the Host whitelist and `pointerEffect()` turn a stored `lens`
+ * into 不显示. Keeping the names in the schema is what stops schemastery from rejecting an old
+ * profile's whole config document; they are absent from this table because the card no longer
+ * offers a choice the user asked to retire.
  */
 const POINTER_EFFECT_CHOICES = [
   // The description is used only as the button's `title` (a tooltip), never rendered as a line of
