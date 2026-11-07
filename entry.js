@@ -336,10 +336,15 @@ const BREAK_STYLES = ['random', 'particles', 'fall', 'glitch']
  * The accepted `screensaverPointerEffect` values.
  *
  * `none` first: it is the default, and the card shows them in this order. `random` picks per
- * appearance. The other three name implementations in src/screensaver.js, and this list is the one
+ * appearance. The other two name implementations in src/screensaver.js, and this list is the one
  * place a new one has to be registered.
+ *
+ * `lens` (菱形涟漪) is GONE, by request, and it was REMOVED rather than hidden. It was the one
+ * effect that never came out right — it displaced a disc of the picture and measured as a large,
+ * evenly-lit smear over real artwork. Keeping the implementation behind a removed picker is exactly
+ * what let a stale profile value keep drawing it while the card offered no way to turn it off.
  */
-const POINTER_EFFECTS = ['none', 'random', 'ripples', 'attract', 'lens']
+const POINTER_EFFECTS = ['none', 'random', 'ripples', 'attract']
 
 /**
  * Whether the resolved schemastery can mark a Config field live-editable.
@@ -455,7 +460,6 @@ export const Config = z.object({
     z.const('random').description('随机'),
     z.const('ripples').description('水波涟漪'),
     z.const('attract').description('星屑吸附'),
-    z.const('lens').description('菱形涟漪'),
   ]).default(DEFAULT_SETTINGS.screensaverPointerEffect)),
   disabledScreensaver: live(z.array(z.string()).default([])),
   // Whether the screensaver's media may make a sound. OFF by default: this layer covers the

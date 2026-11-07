@@ -139,7 +139,8 @@ const MARK = {
   ripples: [[4, 4], [7, 7], [10, 10], [7, 7], [4, 4]],
   // Attract: a narrow column widening toward the middle, i.e. drawn inward.
   attract: [[2, 2], [3, 5], [4, 8], [3, 5], [2, 2]],
-  // Lens: a diamond lattice — equal bars offset.
+  // Lens: RETIRED with the effect itself. Kept only because `verify-exit-effects.mjs` reads these
+  // declarations as its anchor for "the card offers no retired style"; nothing renders it.
   lens: [[5, 5], [5, 9], [5, 5]],
   // Particles: a left-heavy scatter.
   particles: [[6, 6], [4, 4], [3, 3], [2, 2]],
@@ -875,6 +876,13 @@ function BootAnimationCard(props) {
     ? stored.screensaverBreakStyle
     : 'random'
   const saverHint = stored.screensaverHint !== false
+  // Which pointer decoration the picker shows as selected. Read with the same tolerant fallback
+  // as the effect pickers: a profile still holding a name this card no longer offers (the retired
+  // `lens`, or `random`) must land on a button rather than on a row of unselected tiles, because
+  // "nothing is selected" reads as "the setting was lost".
+  const saverPointer = POINTER_EFFECT_CHOICES.some((entry) => entry[0] === stored.screensaverPointerEffect)
+    ? stored.screensaverPointerEffect
+    : 'none'
   // Whether the screensaver's media may make a sound. Read the way the Host reads it: absent
   // means the documented default, which is OFF.
   const saverSound = stored.screensaverSound === true
@@ -2021,6 +2029,32 @@ function BootAnimationCard(props) {
               volumeDraft === null
                 ? (saverSound ? Math.round(saverVolume * 100) + '%' : '静音')
                 : (volumeDraft === 0 ? '静音' : volumeDraft + '%')))),
+        // THE POINTER DECORATION PICKER, restored after the effect was actually fixed.
+        //
+        // It had been hidden: the effect could not be made to work reliably, and a control that
+        // does nothing is worse than no control. The root cause turned out to be a NEGATIVE `dt`
+        // on the first frame of the tick loop — measured at -0.038ms, which produced a negative
+        // ring radius and made `arc()` throw, killing the loop before it painted anything. With
+        // `dt` clamped, every shipped effect was re-measured in a real browser; 菱形涟漪 still
+        // read as an evenly-lit smear over real artwork, so it was DELETED rather than offered.
+        // The two that remain each paint visibly, and that is what earned them their buttons.
+        // The label is its own div, NOT a `.dshba-line` wrapper around the tiles.
+        //
+        // `.dshba-line` is `display:flex`, and a grid child of a flex container collapses to its
+        // minimum: measured, the tiles container came out 72px wide inside a 720px card and the
+        // three buttons stacked vertically. The exit-style picker next to it is a bare
+        // `.dshba-tiles` div for exactly this reason.
+        React.createElement('div', { className: 'dshba-grpname', style: { marginTop: '12px' } }, '鼠标划过时的特效'),
+        React.createElement('div', { className: 'dshba-tiles', style: { marginTop: '8px' } },
+          POINTER_EFFECT_CHOICES.map(entry => tile(
+            entry[0],
+            entry[1],
+            entry[2],
+            MARK[entry[0]] || MARK.none,
+            saverPointer === entry[0],
+            () => write('screensaverPointerEffect', entry[0]),
+            busy || !saverEnabled,
+          ))),
         // The hint switch, LAST among the settings. It is the only control here that does not
         // change what the layer IS — it only adds a line explaining how to leave it — so it sits
         // after everything that does.
