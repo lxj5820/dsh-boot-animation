@@ -459,15 +459,16 @@ record('every name the card can offer is accepted by the Host whitelist',
 record('the Host whitelist keeps 随机, so an old profile still validates',
   hostPointerList.includes('random'),
   hostPointerList.join(','))
-// 菱形涟漪 is GONE from every list — this is the assertion that makes the deletion stick.
-record('菱形涟漪 is deleted from the Host whitelist, the schema and the card',
+// 菱形涟漪 is gone from the WHITELIST, the CARD and the IMPLEMENTATION — that is what stops it
+// being drawn. The name deliberately STAYS in the schema: dropping it makes `union()` throw on a
+// stored `lens`, which rejects that profile's whole config document instead of falling back.
+record('菱形涟漪 is deleted from the Host whitelist, the card and the implementation',
   !hostPointerList.includes('lens')
-  && !entry.includes("z.const('lens')")
   && !pointerChoiceNames.includes('lens')
   && !/tickLens|LENS_RADIUS|captureSource/.test(saver),
-  'something still references lens')
-record('the schema still accepts the retired names',
-  POINTER.every(v => entry.includes("z.const('" + v + "')")),
+  'something still renders lens')
+record('the schema keeps the retired names, so an old profile still validates',
+  ['lens', 'random'].every(v => entry.includes("z.const('" + v + "')")),
   'dropping a member from the enum would reject the stored config document')
 record('the screensaver implements every effect the card can offer',
   ['tickRipples', 'tickAttract'].every(f => saver.includes('const ' + f)))
