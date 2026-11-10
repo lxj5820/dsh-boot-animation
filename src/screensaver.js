@@ -34,6 +34,11 @@
 // Either one firing shows the screensaver. That is the point: they cover each
 // other's blind spots.
 //
+// Neither condition may fire while a conversation Turn is still running: the page is
+// then showing work in progress, and covering it would hide the answer the user is
+// waiting for. That guard is a fact about the page rather than a preference, so it
+// reads the chat UI's own DOM marker instead of a setting — see `chatTurnRunning`.
+//
 // There is no settings card, no React, and no dependency on the boot screen's
 // namespace. It is plain DOM, because it must survive the app's own UI failing.
 
@@ -488,6 +493,27 @@ function hiddenFor() {
 /** How long `hidden` must persist before it is believed. */
 const HIDDEN_GRACE_MS = 5000
 
+/**
+ * Whether a conversation Turn is still running, read from the chat UI's own DOM marker.
+ *
+ * A running Turn is the page showing work in progress: covering it would hide the answer
+ * the user is waiting for, which is the exact complaint this guard exists to answer. The
+ * marker is `[data-chat-running]` on the chat's running-status row. `[data-holding]` is its
+ * idle twin — after a Turn's content is complete the row stays mounted, hidden, until the
+ * actions row replaces it — so a holding row must not count as running.
+ *
+ * Presence-only, and never an error: the chat UI is a different package that may change its
+ * DOM, and a throwing check here would take the whole screensaver down with it. If the marker
+ * disappears in a future DSH, the guard degrades to "never suppress" rather than "never show".
+ */
+function chatTurnRunning() {
+  try {
+    return document.querySelector('[data-chat-running]:not([data-holding])') !== null
+  } catch {
+    return false
+  }
+}
+
 /** Whether either idle condition has been met. */
 function shouldShow() {
   // THE LIVE `screensaverEnabled`, not the install-time snapshot. The layer is installed
@@ -517,6 +543,12 @@ function shouldShow() {
   // another window still reports 'visible', because that is an operating-system fact the
   // renderer cannot see.
   if (hiddenFor() >= HIDDEN_GRACE_MS) return false
+  // A Turn that is still running holds the screen for the user: the page is showing work in
+  // progress and will show the answer at the end. Both idle halves below would otherwise cover
+  // exactly that moment — the OS counter sees "nobody touched the keyboard" while the user
+  // reads, and the focus flag sees "another window is foreground" while the Turn keeps
+  // generating. Neither reading is the absence this feature is for.
+  if (chatTurnRunning()) return false
   // The OS half. Only a reading counts: 'starting' means the probe has not answered
   // yet, and 'unavailable' means it never will, so neither may be read as "idle".
   //
@@ -2188,7 +2220,7 @@ function saverState() {
     hasLayer: root !== null,
     mediaCount: root === null ? 0 : root.querySelectorAll('.' + PREFIX + '-media').length,
     // WHY THE LAYER IS BEING HELD BACK, in the same order `shouldShow` checks.
-    blockedBy: !saverEnabled() ? 'disabled' : (overlayUp ? 'boot-overlay' : null),
+    blockedBy: !saverEnabled() ? 'disabled' : (overlayUp ? 'boot-overlay' : (chatTurnRunning() ? 'turn-running' : null)),
     // WHAT THE EFFECTS WILL ACTUALLY USE, as opposed to what the settings document says.
     //
     // This was missing for four rounds of "the chosen effect is not the one that plays", and the
